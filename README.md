@@ -2,10 +2,10 @@
 
 QUIC 기반 OTT 스트리밍 학습용 프로젝트. [docs/SRS.md](docs/SRS.md)와 [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md)에 맞춰 개발됩니다.
 
-## 현재 상태 (Sprint 1)
-- 기본 디렉터리 구조 생성
-- C 진입점(`src/main.c`) 및 빌드 시스템 준비
-- Docker/Docker Compose 환경 정의
+## 현재 상태 (Sprint 2)
+- SQLite 기반 데이터베이스 모듈(`src/db/database.*`) 및 스키마/CRUD 구현
+- 비밀번호 해시 유틸(`src/auth/hash.*`)과 간단한 단위 테스트(`tests/db_test.c`)
+- 기본 실행 파일과 Docker/Docker Compose 환경 유지
 
 ## 프로젝트 구조
 ```
@@ -25,6 +25,7 @@ ott_quic/
 ```bash
 make        # build/ott_server 생성
 ./build/ott_server
+make test   # SQLite/해시 모듈 기본 단위 테스트
 ```
 
 ## Docker 사용

@@ -1,27 +1,43 @@
 CC := gcc
 CFLAGS := -Wall -Wextra -Werror -std=c11 -pedantic
+CPPFLAGS := -Isrc
 LDFLAGS :=
+LDLIBS := -lsqlite3
 
 BUILD_DIR := build
 TARGET := $(BUILD_DIR)/ott_server
 
-SRCS := $(shell find src -name '*.c')
-OBJS := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(SRCS))
+SRC_FILES := $(shell find src -name '*.c')
+OBJ_FILES := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(SRC_FILES))
+MAIN_OBJ := $(BUILD_DIR)/main.o
+LIB_OBJ_FILES := $(filter-out $(MAIN_OBJ), $(OBJ_FILES))
 
-.PHONY: all clean run
+TEST_BINS := $(BUILD_DIR)/tests/db_test
+
+.PHONY: all clean run test
 
 all: $(TARGET)
 
-$(TARGET): $(OBJS)
+$(TARGET): $(OBJ_FILES)
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
 
 $(BUILD_DIR)/%.o: src/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/tests/db_test: tests/db_test.c $(LIB_OBJ_FILES)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
 
 run: $(TARGET)
 	$(TARGET)
+
+test: $(TEST_BINS)
+	@for t in $(TEST_BINS); do \
+		echo \"Running $$t\"; \
+		$$t; \
+	done
 
 clean:
 	rm -rf $(BUILD_DIR)
