@@ -12,7 +12,12 @@ OBJ_FILES := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(SRC_FILES))
 MAIN_OBJ := $(BUILD_DIR)/main.o
 LIB_OBJ_FILES := $(filter-out $(MAIN_OBJ), $(OBJ_FILES))
 
-TEST_BINS := $(BUILD_DIR)/tests/db_test $(BUILD_DIR)/tests/server_test $(BUILD_DIR)/tests/websocket_utils_test
+TEST_BINS := \
+	$(BUILD_DIR)/tests/db_test \
+	$(BUILD_DIR)/tests/server_test \
+	$(BUILD_DIR)/tests/websocket_utils_test \
+	$(BUILD_DIR)/tests/quic_packet_test \
+	$(BUILD_DIR)/tests/quic_engine_test
 
 .PHONY: all clean run test
 
@@ -35,6 +40,14 @@ $(BUILD_DIR)/tests/server_test: tests/server_test.c $(LIB_OBJ_FILES)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
 
 $(BUILD_DIR)/tests/websocket_utils_test: tests/websocket_utils_test.c $(LIB_OBJ_FILES)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
+
+$(BUILD_DIR)/tests/quic_packet_test: tests/quic_packet_test.c $(LIB_OBJ_FILES)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
+
+$(BUILD_DIR)/tests/quic_engine_test: tests/quic_engine_test.c $(LIB_OBJ_FILES)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
 
