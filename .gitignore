@@ -1,0 +1,25 @@
+# Build artifacts
+/build/
+/bin/
+*.o
+*.a
+*.so
+*.out
+
+# IDE files
+.vscode/
+.idea/
+.DS_Store
+
+# Logs
+*.log
+
+# Data outputs
+/data/ott.db
+/data/videos/
+!/data/videos/.gitkeep
+/data/thumbnails/
+!/data/thumbnails/.gitkeep
+
+# Docker
+*.pid
