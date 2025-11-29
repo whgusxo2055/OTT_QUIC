@@ -7,7 +7,34 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-static void send_and_expect_echo(uint16_t port, const char *payload) {
+static int contains_sequence(const char *buffer, size_t len, const char *sequence, size_t seq_len) {
+    if (seq_len == 0 || len < seq_len) {
+        return 0;
+    }
+    for (size_t i = seq_len - 1; i < len; ++i) {
+        if (memcmp(buffer + i - (seq_len - 1), sequence, seq_len) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void read_until_sequence(int fd, const char *sequence) {
+    size_t seq_len = strlen(sequence);
+    char buffer[512];
+    size_t total = 0;
+    while (total < sizeof(buffer)) {
+        ssize_t n = recv(fd, buffer + total, sizeof(buffer) - total, 0);
+        assert(n > 0);
+        total += (size_t)n;
+        if (contains_sequence(buffer, total, sequence, seq_len)) {
+            return;
+        }
+    }
+    assert(!"sequence not found");
+}
+
+static void websocket_client_echo(uint16_t port, const char *message) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     assert(fd >= 0);
 
@@ -19,13 +46,54 @@ static void send_and_expect_echo(uint16_t port, const char *payload) {
 
     assert(connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0);
 
-    size_t len = strlen(payload);
-    assert(send(fd, payload, len, 0) == (ssize_t)len);
+    const char *key = "dGhlIHNhbXBsZSBub25jZQ==";
+    char request[512];
+    int req_len = snprintf(request,
+                           sizeof(request),
+                           "GET /chat HTTP/1.1\r\n"
+                           "Host: localhost\r\n"
+                           "Upgrade: websocket\r\n"
+                           "Connection: Upgrade\r\n"
+                           "Sec-WebSocket-Key: %s\r\n"
+                           "Sec-WebSocket-Version: 13\r\n"
+                           "\r\n",
+                           key);
+    assert(req_len > 0);
+    assert(send(fd, request, (size_t)req_len, 0) == req_len);
 
-    char buffer[128] = {0};
-    ssize_t received = recv(fd, buffer, sizeof(buffer), 0);
-    assert(received == (ssize_t)len);
-    assert(strncmp(buffer, payload, len) == 0);
+    read_until_sequence(fd, "\r\n\r\n");
+
+    size_t len = strlen(message);
+    assert(len <= 125);
+
+    uint8_t frame[2 + 4 + 125];
+    frame[0] = 0x81; // FIN + text
+    frame[1] = 0x80 | (uint8_t)len;
+    uint8_t mask[4] = {0x12, 0x34, 0x56, 0x78};
+    memcpy(&frame[2], mask, 4);
+    for (size_t i = 0; i < len; ++i) {
+        frame[6 + i] = ((uint8_t)message[i]) ^ mask[i % 4];
+    }
+
+    assert(send(fd, frame, 6 + len, 0) == (ssize_t)(6 + len));
+
+    uint8_t header[2];
+    assert(recv(fd, header, 2, MSG_WAITALL) == 2);
+    assert((header[0] & 0x0F) == 0x1);
+    size_t resp_len = header[1] & 0x7F;
+    assert(resp_len == len);
+
+    char payload[125] = {0};
+    assert(recv(fd, payload, resp_len, MSG_WAITALL) == (ssize_t)resp_len);
+    assert(strncmp(payload, message, resp_len) == 0);
+
+    // send close frame
+    uint8_t close_frame[2 + 4];
+    close_frame[0] = 0x88;
+    close_frame[1] = 0x80;
+    uint8_t close_mask[4] = {0x00, 0x00, 0x00, 0x01};
+    memcpy(&close_frame[2], close_mask, 4);
+    assert(send(fd, close_frame, sizeof(close_frame), 0) == (ssize_t)sizeof(close_frame));
 
     close(fd);
 }
@@ -39,8 +107,8 @@ int main(void) {
 
     usleep(100 * 1000);
 
-    send_and_expect_echo(port, "hello");
-    send_and_expect_echo(port, "world");
+    websocket_client_echo(port, "hello");
+    websocket_client_echo(port, "world");
 
     server_request_stop(&server);
     server_join(&server);

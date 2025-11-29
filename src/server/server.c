@@ -1,4 +1,5 @@
 #include "server/server.h"
+#include "server/websocket.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -12,7 +13,6 @@
 #include <unistd.h>
 
 #define SERVER_BACKLOG 8
-#define SERVER_BUFFER_SIZE 1024
 
 typedef struct {
     server_ctx_t *ctx;
@@ -199,25 +199,7 @@ static void *client_worker(void *arg) {
     int client_fd = task->client_fd;
     free(task);
 
-    char buffer[SERVER_BUFFER_SIZE];
-    ssize_t bytes;
-
-    while ((bytes = recv(client_fd, buffer, sizeof(buffer), 0)) > 0) {
-        ssize_t sent = 0;
-        while (sent < bytes) {
-            ssize_t n = send(client_fd, buffer + sent, (size_t)(bytes - sent), MSG_NOSIGNAL);
-            if (n <= 0) {
-                bytes = -1;
-                break;
-            }
-            sent += n;
-        }
-        if (bytes < 0) {
-            break;
-        }
-    }
-
-    close(client_fd);
+    websocket_handle_client(client_fd);
 
     pthread_mutex_lock(&ctx->lock);
     if (ctx->client_count > 0) {
