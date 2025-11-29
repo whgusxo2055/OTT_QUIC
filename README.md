@@ -2,9 +2,10 @@
 
 QUIC 기반 OTT 스트리밍 학습용 프로젝트. [docs/SRS.md](docs/SRS.md)와 [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md)에 맞춰 개발됩니다.
 
-## 현재 상태 (Sprint 2)
+## 현재 상태 (Sprint 3)
 - SQLite 기반 데이터베이스 모듈(`src/db/database.*`) 및 스키마/CRUD 구현
 - 비밀번호 해시 유틸(`src/auth/hash.*`)과 간단한 단위 테스트(`tests/db_test.c`)
+- 멀티스레드 TCP 서버(`src/server/server.*`)와 에코 동작 테스트(`tests/server_test.c`)
 - 기본 실행 파일과 Docker/Docker Compose 환경 유지
 
 ## 프로젝트 구조
