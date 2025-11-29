@@ -9,6 +9,9 @@
 extern "C" {
 #endif
 
+struct websocket_context;
+typedef struct websocket_context websocket_context_t;
+
 typedef struct server_ctx {
     int listen_fd;
     pthread_t accept_thread;
@@ -18,6 +21,7 @@ typedef struct server_ctx {
     int max_clients;
     uint16_t port;
     char bind_ip[INET_ADDRSTRLEN];
+    websocket_context_t *ws_context;
 } server_ctx_t;
 
 int server_init(server_ctx_t *ctx, const char *bind_ip, uint16_t port, int max_clients);
@@ -25,6 +29,7 @@ int server_start(server_ctx_t *ctx);
 void server_request_stop(server_ctx_t *ctx);
 void server_join(server_ctx_t *ctx);
 void server_destroy(server_ctx_t *ctx);
+void server_set_websocket_context(server_ctx_t *ctx, websocket_context_t *ws_ctx);
 
 #ifdef __cplusplus
 }

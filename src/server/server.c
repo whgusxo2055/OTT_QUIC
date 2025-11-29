@@ -42,6 +42,7 @@ int server_init(server_ctx_t *ctx, const char *bind_ip, uint16_t port, int max_c
     ctx->port = port;
     strncpy(ctx->bind_ip, bind_ip, sizeof(ctx->bind_ip) - 1);
     pthread_mutex_init(&ctx->lock, NULL);
+    ctx->ws_context = NULL;
 
     ctx->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (ctx->listen_fd < 0) {
@@ -126,6 +127,13 @@ void server_destroy(server_ctx_t *ctx) {
     memset(ctx, 0, sizeof(*ctx));
 }
 
+void server_set_websocket_context(server_ctx_t *ctx, websocket_context_t *ws_ctx) {
+    if (!ctx) {
+        return;
+    }
+    ctx->ws_context = ws_ctx;
+}
+
 static void *accept_loop(void *arg) {
     server_ctx_t *ctx = (server_ctx_t *)arg;
 
@@ -199,7 +207,7 @@ static void *client_worker(void *arg) {
     int client_fd = task->client_fd;
     free(task);
 
-    websocket_handle_client(client_fd);
+    websocket_handle_client(client_fd, ctx->ws_context);
 
     pthread_mutex_lock(&ctx->lock);
     if (ctx->client_count > 0) {

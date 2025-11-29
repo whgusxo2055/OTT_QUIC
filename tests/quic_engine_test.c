@@ -99,7 +99,7 @@ int main(void) {
 
     close(client_fd);
     quic_engine_stop(&engine);
-    pthread_join(engine.thread, NULL);
+    quic_engine_join(&engine);
     quic_engine_destroy(&engine);
 
     pthread_mutex_destroy(&state.lock);

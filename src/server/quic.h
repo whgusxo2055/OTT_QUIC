@@ -5,6 +5,7 @@
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -14,6 +15,7 @@ extern "C" {
 #define QUIC_HEADER_SIZE        25
 #define QUIC_MAX_PACKET_SIZE    (QUIC_HEADER_SIZE + QUIC_MAX_PAYLOAD)
 #define QUIC_MAX_CONNECTIONS    32
+#define QUIC_CONNECTION_TIMEOUT 30
 
 #define QUIC_FLAG_INITIAL   0x01
 #define QUIC_FLAG_HANDSHAKE 0x02
@@ -33,6 +35,13 @@ typedef struct {
 struct quic_engine;
 typedef void (*quic_packet_handler)(const quic_packet_t *packet, const struct sockaddr_in *addr, void *user_data);
 
+typedef struct {
+    uint64_t connection_id;
+    struct sockaddr_in addr;
+    time_t last_seen;
+    int in_use;
+} quic_connection_entry_t;
+
 typedef struct quic_engine {
     int sockfd;
     uint16_t port;
@@ -41,11 +50,7 @@ typedef struct quic_engine {
     int running;
     quic_packet_handler handler;
     void *user_data;
-    struct {
-        uint64_t connection_id;
-        struct sockaddr_in addr;
-        int in_use;
-    } connections[QUIC_MAX_CONNECTIONS];
+    quic_connection_entry_t connections[QUIC_MAX_CONNECTIONS];
 } quic_engine_t;
 
 int quic_packet_serialize(const quic_packet_t *packet, uint8_t *buffer, size_t buffer_len, size_t *out_len);
@@ -54,8 +59,10 @@ int quic_packet_deserialize(quic_packet_t *packet, const uint8_t *buffer, size_t
 int quic_engine_init(quic_engine_t *engine, uint16_t port, quic_packet_handler handler, void *user_data);
 int quic_engine_start(quic_engine_t *engine);
 void quic_engine_stop(quic_engine_t *engine);
+void quic_engine_join(quic_engine_t *engine);
 void quic_engine_destroy(quic_engine_t *engine);
 int quic_engine_send(const quic_engine_t *engine, const quic_packet_t *packet, const struct sockaddr_in *addr);
+int quic_engine_send_to_connection(quic_engine_t *engine, const quic_packet_t *packet);
 int quic_engine_get_connection(quic_engine_t *engine, uint64_t connection_id, struct sockaddr_in *addr_out);
 
 #ifdef __cplusplus

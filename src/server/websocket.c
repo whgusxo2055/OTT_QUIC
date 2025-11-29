@@ -3,6 +3,7 @@
 #include "server/http.h"
 
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -23,6 +24,21 @@ typedef struct {
     uint8_t *payload;
 } ws_frame_t;
 
+typedef enum {
+    WS_CMD_UNKNOWN = 0,
+    WS_CMD_PING,
+    WS_CMD_QUIC_SEND
+} ws_command_type;
+
+typedef struct {
+    ws_command_type type;
+    uint64_t connection_id;
+    uint32_t stream_id;
+    uint32_t offset;
+    uint8_t payload[QUIC_MAX_PAYLOAD];
+    size_t payload_len;
+} ws_command_t;
+
 static int read_http_request(int fd, char *buffer, size_t buf_size, size_t *out_len);
 static int send_http_error(int fd, const char *status_line);
 static int perform_handshake(int fd, http_request_t *request);
@@ -36,8 +52,35 @@ static int base64_encode(const uint8_t *data, size_t len, char *out, size_t out_
 static int read_exact(int fd, void *buf, size_t len);
 static int write_all(int fd, const void *buf, size_t len);
 static int header_contains_token(const char *value, const char *token);
+static const char *json_find_value(const char *json, const char *key);
+static int json_extract_string_field(const char *json, const char *key, char *out, size_t out_size);
+static int json_extract_uint64_field(const char *json, const char *key, uint64_t *out);
+static int json_extract_uint32_field(const char *json, const char *key, uint32_t *out);
+static int parse_command(const char *text, ws_command_t *cmd);
+static int hex_to_bytes(const char *hex, uint8_t *out, size_t max_len, size_t *out_len);
+static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t *frame);
+static int send_json_response(int fd, const char *type, const char *status, const char *message);
+static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t *frame);
 
-int websocket_handle_client(int client_fd) {
+void websocket_context_init(websocket_context_t *ctx, quic_engine_t *engine) {
+    if (!ctx) {
+        return;
+    }
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->quic_engine = engine;
+    pthread_mutex_init(&ctx->lock, NULL);
+    ctx->next_packet_number = 1;
+}
+
+void websocket_context_destroy(websocket_context_t *ctx) {
+    if (!ctx) {
+        return;
+    }
+    pthread_mutex_destroy(&ctx->lock);
+    memset(ctx, 0, sizeof(*ctx));
+}
+
+int websocket_handle_client(int client_fd, websocket_context_t *ctx) {
     char buffer[WS_MAX_HTTP_BUFFER];
     size_t received = 0;
     if (read_http_request(client_fd, buffer, sizeof(buffer), &received) != 0) {
@@ -65,13 +108,19 @@ int websocket_handle_client(int client_fd) {
         return -1;
     }
 
+    send_json_response(client_fd, "ready", "ok", "websocket-ready");
+
     while (1) {
         ws_frame_t frame = {0};
         if (ws_read_frame(client_fd, &frame) != 0) {
             break;
         }
 
-        if (frame.opcode == 0x1 || frame.opcode == 0x2 || frame.opcode == 0x0) {
+        if (frame.opcode == 0x1) {
+            if (handle_text_frame(client_fd, ctx, &frame) != 0 && frame.payload) {
+                ws_send_frame(client_fd, 0x1, frame.payload, (size_t)frame.payload_len);
+            }
+        } else if (frame.opcode == 0x2 || frame.opcode == 0x0) {
             ws_send_frame(client_fd, frame.opcode ? frame.opcode : 0x1, frame.payload, (size_t)frame.payload_len);
         } else if (frame.opcode == 0x8) {
             ws_send_frame(client_fd, 0x8, frame.payload, (size_t)frame.payload_len);
@@ -361,6 +410,225 @@ static int write_all(int fd, const void *buf, size_t len) {
         total += (size_t)n;
     }
     return 0;
+}
+
+static int send_json_response(int fd, const char *type, const char *status, const char *message) {
+    char payload[256];
+    const char *safe_message = message ? message : "";
+    int len = snprintf(payload,
+                       sizeof(payload),
+                       "{\"type\":\"%s\",\"status\":\"%s\",\"message\":\"%s\"}",
+                       type ? type : "event",
+                       status ? status : "ok",
+                       safe_message);
+    if (len <= 0) {
+        return -1;
+    }
+    if ((size_t)len >= sizeof(payload)) {
+        len = (int)sizeof(payload) - 1;
+        payload[len] = '\0';
+    }
+    return ws_send_frame(fd, 0x1, (const uint8_t *)payload, (size_t)len);
+}
+
+static const char *json_find_value(const char *json, const char *key) {
+    if (!json || !key) {
+        return NULL;
+    }
+    char pattern[64];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    const char *pos = strstr(json, pattern);
+    if (!pos) {
+        return NULL;
+    }
+    pos = strchr(pos + strlen(pattern), ':');
+    if (!pos) {
+        return NULL;
+    }
+    pos++;
+    while (*pos && isspace((unsigned char)*pos)) {
+        pos++;
+    }
+    return pos;
+}
+
+static int json_extract_string_field(const char *json, const char *key, char *out, size_t out_size) {
+    if (!json || !key || !out || out_size == 0) {
+        return -1;
+    }
+    const char *value = json_find_value(json, key);
+    if (!value || *value != '\"') {
+        return -1;
+    }
+    value++;
+    const char *end = strchr(value, '\"');
+    if (!end) {
+        return -1;
+    }
+    size_t copy_len = (size_t)(end - value);
+    if (copy_len >= out_size) {
+        copy_len = out_size - 1;
+    }
+    memcpy(out, value, copy_len);
+    out[copy_len] = '\0';
+    return 0;
+}
+
+static int json_extract_uint64_field(const char *json, const char *key, uint64_t *out) {
+    if (!json || !key || !out) {
+        return -1;
+    }
+    const char *value = json_find_value(json, key);
+    if (!value) {
+        return -1;
+    }
+    char *endptr = NULL;
+    unsigned long long parsed = strtoull(value, &endptr, 10);
+    if (value == endptr) {
+        return -1;
+    }
+    *out = (uint64_t)parsed;
+    return 0;
+}
+
+static int json_extract_uint32_field(const char *json, const char *key, uint32_t *out) {
+    uint64_t tmp = 0;
+    if (json_extract_uint64_field(json, key, &tmp) != 0) {
+        return -1;
+    }
+    if (tmp > UINT32_MAX) {
+        return -1;
+    }
+    *out = (uint32_t)tmp;
+    return 0;
+}
+
+static int hex_to_bytes(const char *hex, uint8_t *out, size_t max_len, size_t *out_len) {
+    if (!hex || !out) {
+        return -1;
+    }
+    size_t hex_len = strlen(hex);
+    if (hex_len == 0) {
+        *out_len = 0;
+        return 0;
+    }
+    if (hex_len % 2 != 0) {
+        return -1;
+    }
+    size_t bytes_needed = hex_len / 2;
+    if (bytes_needed > max_len) {
+        return -1;
+    }
+    for (size_t i = 0; i < bytes_needed; ++i) {
+        char byte_str[3] = {hex[2 * i], hex[2 * i + 1], '\0'};
+        char *endptr = NULL;
+        long value = strtol(byte_str, &endptr, 16);
+        if (endptr == byte_str) {
+            return -1;
+        }
+        out[i] = (uint8_t)value;
+    }
+    if (out_len) {
+        *out_len = bytes_needed;
+    }
+    return 0;
+}
+
+static int parse_command(const char *text, ws_command_t *cmd) {
+    if (!text || !cmd) {
+        return -1;
+    }
+
+    memset(cmd, 0, sizeof(*cmd));
+    char type[32];
+    if (json_extract_string_field(text, "type", type, sizeof(type)) != 0) {
+        return -1;
+    }
+
+    if (strcmp(type, "ping") == 0) {
+        cmd->type = WS_CMD_PING;
+        return 0;
+    }
+
+    if (strcmp(type, "quic_send") == 0) {
+        cmd->type = WS_CMD_QUIC_SEND;
+        if (json_extract_uint64_field(text, "connection_id", &cmd->connection_id) != 0) {
+            return -1;
+        }
+        if (json_extract_uint32_field(text, "stream_id", &cmd->stream_id) != 0) {
+            cmd->stream_id = 1;
+        }
+        if (json_extract_uint32_field(text, "offset", &cmd->offset) != 0) {
+            cmd->offset = 0;
+        }
+        char payload_hex[QUIC_MAX_PAYLOAD * 2 + 1];
+        if (json_extract_string_field(text, "payload_hex", payload_hex, sizeof(payload_hex)) == 0) {
+            if (hex_to_bytes(payload_hex, cmd->payload, sizeof(cmd->payload), &cmd->payload_len) != 0) {
+                return -1;
+            }
+        } else {
+            cmd->payload_len = 0;
+        }
+        return 0;
+    }
+
+    return -1;
+}
+
+static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t *frame) {
+    if (!frame->payload || frame->payload_len == 0) {
+        return send_json_response(fd, "error", "bad_request", "empty-payload");
+    }
+
+    char *text = malloc((size_t)frame->payload_len + 1);
+    if (!text) {
+        return send_json_response(fd, "error", "internal_error", "alloc-failed");
+    }
+    memcpy(text, frame->payload, (size_t)frame->payload_len);
+    text[frame->payload_len] = '\0';
+
+    ws_command_t cmd;
+    if (parse_command(text, &cmd) != 0) {
+        free(text);
+        return send_json_response(fd, "error", "bad_request", "unknown-command");
+    }
+    free(text);
+
+    if (cmd.type == WS_CMD_PING) {
+        return send_json_response(fd, "pong", "ok", "alive");
+    }
+
+    if (cmd.type == WS_CMD_QUIC_SEND) {
+        if (!ctx || !ctx->quic_engine) {
+            return send_json_response(fd, "error", "unavailable", "quic-engine-missing");
+        }
+
+        quic_packet_t packet = {
+            .flags = QUIC_FLAG_DATA,
+            .connection_id = cmd.connection_id,
+            .stream_id = cmd.stream_id,
+            .offset = cmd.offset,
+            .length = (uint32_t)cmd.payload_len,
+            .payload = cmd.payload,
+        };
+
+        pthread_mutex_lock(&ctx->lock);
+        packet.packet_number = ctx->next_packet_number++;
+        pthread_mutex_unlock(&ctx->lock);
+
+        if (quic_engine_send_to_connection(ctx->quic_engine, &packet) != 0) {
+            return send_json_response(fd, "error", "quic_send_failed", "connection-not-found");
+        }
+
+        char detail[128];
+        snprintf(detail,
+                 sizeof(detail),
+                 "sent-pn-%u",
+                 packet.packet_number);
+        return send_json_response(fd, "quic_send", "ok", detail);
+    }
+
+    return send_json_response(fd, "error", "bad_request", "unsupported");
 }
 
 typedef struct {

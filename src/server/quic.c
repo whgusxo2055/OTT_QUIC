@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 static uint64_t host_to_be64(uint64_t value) {
@@ -26,6 +27,7 @@ static uint64_t be64_to_host(uint64_t value) {
 }
 
 static void quic_engine_record_connection(quic_engine_t *engine, uint64_t connection_id, const struct sockaddr_in *addr);
+static void quic_engine_cleanup_connections_locked(quic_engine_t *engine, time_t now);
 static void *quic_engine_loop(void *arg);
 
 int quic_packet_serialize(const quic_packet_t *packet, uint8_t *buffer, size_t buffer_len, size_t *out_len) {
@@ -168,6 +170,13 @@ void quic_engine_stop(quic_engine_t *engine) {
     }
 }
 
+void quic_engine_join(quic_engine_t *engine) {
+    if (!engine) {
+        return;
+    }
+    pthread_join(engine->thread, NULL);
+}
+
 void quic_engine_destroy(quic_engine_t *engine) {
     if (!engine) {
         return;
@@ -207,24 +216,43 @@ int quic_engine_get_connection(quic_engine_t *engine, uint64_t connection_id, st
     }
 
     int found = -1;
-    pthread_mutex_lock((pthread_mutex_t *)&engine->lock);
+    time_t now = time(NULL);
+    pthread_mutex_lock(&engine->lock);
+    quic_engine_cleanup_connections_locked(engine, now);
     for (int i = 0; i < QUIC_MAX_CONNECTIONS; ++i) {
         if (engine->connections[i].in_use && engine->connections[i].connection_id == connection_id) {
             *addr_out = engine->connections[i].addr;
+            engine->connections[i].last_seen = now;
             found = 0;
             break;
         }
     }
-    pthread_mutex_unlock((pthread_mutex_t *)&engine->lock);
+    pthread_mutex_unlock(&engine->lock);
     return found;
 }
 
+int quic_engine_send_to_connection(quic_engine_t *engine, const quic_packet_t *packet) {
+    if (!engine || !packet) {
+        return -1;
+    }
+
+    struct sockaddr_in addr;
+    if (quic_engine_get_connection(engine, packet->connection_id, &addr) != 0) {
+        return -1;
+    }
+
+    return quic_engine_send(engine, packet, &addr);
+}
+
 static void quic_engine_record_connection(quic_engine_t *engine, uint64_t connection_id, const struct sockaddr_in *addr) {
+    time_t now = time(NULL);
     pthread_mutex_lock(&engine->lock);
 
     for (int i = 0; i < QUIC_MAX_CONNECTIONS; ++i) {
         if (engine->connections[i].in_use && engine->connections[i].connection_id == connection_id) {
             engine->connections[i].addr = *addr;
+            engine->connections[i].last_seen = now;
+            quic_engine_cleanup_connections_locked(engine, now);
             pthread_mutex_unlock(&engine->lock);
             return;
         }
@@ -235,12 +263,24 @@ static void quic_engine_record_connection(quic_engine_t *engine, uint64_t connec
             engine->connections[i].in_use = 1;
             engine->connections[i].connection_id = connection_id;
             engine->connections[i].addr = *addr;
+            engine->connections[i].last_seen = now;
+            quic_engine_cleanup_connections_locked(engine, now);
             pthread_mutex_unlock(&engine->lock);
             return;
         }
     }
 
+    quic_engine_cleanup_connections_locked(engine, now);
     pthread_mutex_unlock(&engine->lock);
+}
+
+static void quic_engine_cleanup_connections_locked(quic_engine_t *engine, time_t now) {
+    for (int i = 0; i < QUIC_MAX_CONNECTIONS; ++i) {
+        if (engine->connections[i].in_use &&
+            (now - engine->connections[i].last_seen) > QUIC_CONNECTION_TIMEOUT) {
+            engine->connections[i].in_use = 0;
+        }
+    }
 }
 
 static void *quic_engine_loop(void *arg) {

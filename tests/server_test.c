@@ -34,7 +34,17 @@ static void read_until_sequence(int fd, const char *sequence) {
     assert(!"sequence not found");
 }
 
-static void websocket_client_echo(uint16_t port, const char *message) {
+static void expect_text_frame(int fd, char *buffer, size_t buf_size) {
+    uint8_t header[2];
+    assert(recv(fd, header, 2, MSG_WAITALL) == 2);
+    assert((header[0] & 0x0F) == 0x1);
+    size_t resp_len = header[1] & 0x7F;
+    assert(resp_len + 1 < buf_size);
+    assert(recv(fd, buffer, resp_len, MSG_WAITALL) == (ssize_t)resp_len);
+    buffer[resp_len] = '\0';
+}
+
+static void websocket_client_ping(uint16_t port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     assert(fd >= 0);
 
@@ -63,6 +73,11 @@ static void websocket_client_echo(uint16_t port, const char *message) {
 
     read_until_sequence(fd, "\r\n\r\n");
 
+    char ready_buffer[128];
+    expect_text_frame(fd, ready_buffer, sizeof(ready_buffer));
+    assert(strstr(ready_buffer, "\"type\":\"ready\""));
+
+    const char *message = "{\"type\":\"ping\"}";
     size_t len = strlen(message);
     assert(len <= 125);
 
@@ -77,15 +92,9 @@ static void websocket_client_echo(uint16_t port, const char *message) {
 
     assert(send(fd, frame, 6 + len, 0) == (ssize_t)(6 + len));
 
-    uint8_t header[2];
-    assert(recv(fd, header, 2, MSG_WAITALL) == 2);
-    assert((header[0] & 0x0F) == 0x1);
-    size_t resp_len = header[1] & 0x7F;
-    assert(resp_len == len);
-
-    char payload[125] = {0};
-    assert(recv(fd, payload, resp_len, MSG_WAITALL) == (ssize_t)resp_len);
-    assert(strncmp(payload, message, resp_len) == 0);
+    char response[256];
+    expect_text_frame(fd, response, sizeof(response));
+    assert(strstr(response, "\"type\":\"pong\""));
 
     // send close frame
     uint8_t close_frame[2 + 4];
@@ -107,8 +116,8 @@ int main(void) {
 
     usleep(100 * 1000);
 
-    websocket_client_echo(port, "hello");
-    websocket_client_echo(port, "world");
+    websocket_client_ping(port);
+    websocket_client_ping(port);
 
     server_request_stop(&server);
     server_join(&server);
