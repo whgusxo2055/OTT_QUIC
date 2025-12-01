@@ -7,6 +7,12 @@ let streamId = 1;
 let totalBytes = 0;
 let chunkSize = 1024 * 1024;
 let durationMs = 0;
+let mediaSource = null;
+let sourceBuffer = null;
+let segmentQueue = [];
+let appending = false;
+let nextSegment = 0;
+const maxSegments = 10;
 
 function log(msg) {
   const el = document.getElementById('log');
@@ -18,11 +24,15 @@ function connect() {
   socket = new WebSocket(wsUrl);
   socket.onopen = () => log('WebSocket connected');
   socket.onmessage = (ev) => {
-    try {
-      const data = JSON.parse(ev.data);
-      handleMessage(data);
-    } catch (e) {
-      log(`recv: ${ev.data}`);
+    if (typeof ev.data === 'string') {
+      try {
+        const data = JSON.parse(ev.data);
+        handleMessage(data);
+      } catch (e) {
+        log(`recv: ${ev.data}`);
+      }
+    } else {
+      handleBinary(ev.data);
     }
   };
   socket.onerror = (err) => log('ws error ' + err);
@@ -83,14 +93,9 @@ function startStream() {
   }
   connectionId = Math.floor(Math.random() * 1e6) + 1;
   streamId = 1;
-  const chunkLen = 1024 * 1024;
-  send({
-    type: 'stream_start',
-    video_id: currentVideo,
-    connection_id: connectionId,
-    stream_id: streamId,
-    chunk_length: chunkLen,
-  });
+  nextSegment = 0;
+  setupMediaSource();
+  send({type: 'ws_init', video_id: currentVideo});
 }
 
 function requestChunk() {
@@ -223,4 +228,78 @@ function updateMeta() {
   document.getElementById('meta-bytes').textContent = totalBytes || '-';
   document.getElementById('meta-chunk').textContent = chunkSize || '-';
   document.getElementById('seek-offset').value = 0;
+}
+
+function setupMediaSource() {
+  const video = document.getElementById('player');
+  mediaSource = new MediaSource();
+  video.src = URL.createObjectURL(mediaSource);
+  mediaSource.addEventListener('sourceopen', () => {
+    sourceBuffer = mediaSource.addSourceBuffer('video/mp4; codecs=\"avc1.42E01E, mp4a.40.2\"');
+    sourceBuffer.addEventListener('updateend', () => {
+      appending = false;
+      appendNext();
+    });
+  });
+  segmentQueue = [];
+  appending = false;
+}
+
+function handleBinary(data) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    const arr = new Uint8Array(reader.result);
+    if (arr.length < 8) {
+      log('binary too small');
+      return;
+    }
+    const magic = String.fromCharCode(arr[0], arr[1], arr[2], arr[3]);
+    const idx = (arr[4] << 24) | (arr[5] << 16) | (arr[6] << 8) | arr[7];
+    const payload = arr.slice(8);
+    if (magic === 'INIT') {
+      appendSegment(payload.buffer);
+      nextSegment = 0;
+      requestSegment();
+    } else if (magic === 'SEGM') {
+      appendSegment(payload.buffer);
+      nextSegment = idx + 1;
+      if (nextSegment < maxSegments) {
+        requestSegment();
+      }
+    } else {
+      log('unknown binary magic ' + magic);
+    }
+  };
+  reader.readAsArrayBuffer(data);
+}
+
+function appendSegment(buffer) {
+  if (!sourceBuffer) {
+    log('no sourceBuffer');
+    return;
+  }
+  segmentQueue.push(buffer);
+  appendNext();
+}
+
+function appendNext() {
+  if (!sourceBuffer || sourceBuffer.updating || appending || segmentQueue.length === 0) {
+    return;
+  }
+  appending = true;
+  const seg = segmentQueue.shift();
+  try {
+    sourceBuffer.appendBuffer(seg);
+  } catch (e) {
+    log('append error ' + e);
+    appending = false;
+  }
+}
+
+function requestSegment() {
+  send({
+    type: 'ws_segment',
+    video_id: currentVideo,
+    segment: nextSegment,
+  });
 }

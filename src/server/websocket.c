@@ -42,7 +42,9 @@ typedef enum {
     WS_CMD_WATCH_GET,
     WS_CMD_WATCH_UPDATE,
     WS_CMD_STREAM_SEEK,
-    WS_CMD_STREAM_STOP
+    WS_CMD_STREAM_STOP,
+    WS_CMD_WS_INIT,
+    WS_CMD_WS_SEGMENT
 } ws_command_type;
 
 typedef struct {
@@ -58,6 +60,7 @@ typedef struct {
     int user_id;
     int position;
     uint32_t seek_offset;
+    int segment_index;
 } ws_command_t;
 
 static int read_http_request(int fd, char *buffer, size_t buf_size, size_t *out_len);
@@ -93,6 +96,47 @@ static int send_video_chunk(websocket_context_t *ctx,
                             uint32_t offset,
                             uint32_t length,
                             uint32_t *next_packet_number);
+static int send_ws_file(int fd, const char *path, const char magic[4], uint32_t index);
+
+static int send_ws_file(int fd, const char *path, const char magic[4], uint32_t index) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {
+        return -1;
+    }
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return -1;
+    }
+    long size = ftell(fp);
+    if (size <= 0) {
+        fclose(fp);
+        return -1;
+    }
+    rewind(fp);
+
+    size_t total = (size_t)size + 8;
+    uint8_t *buf = malloc(total);
+    if (!buf) {
+        fclose(fp);
+        return -1;
+    }
+    memcpy(buf, magic, 4);
+    buf[4] = (uint8_t)((index >> 24) & 0xFF);
+    buf[5] = (uint8_t)((index >> 16) & 0xFF);
+    buf[6] = (uint8_t)((index >> 8) & 0xFF);
+    buf[7] = (uint8_t)(index & 0xFF);
+
+    size_t n = fread(buf + 8, 1, (size_t)size, fp);
+    fclose(fp);
+    if (n != (size_t)size) {
+        free(buf);
+        return -1;
+    }
+
+    int rc = ws_send_frame(fd, 0x2, buf, total);
+    free(buf);
+    return rc;
+}
 
 void websocket_context_init(websocket_context_t *ctx, quic_engine_t *engine, db_context_t *db) {
     if (!ctx) {
@@ -1046,6 +1090,24 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
             return send_json_response(fd, "error", "internal_error", "response-too-large");
         }
         return ws_send_frame(fd, 0x1, (const uint8_t *)resp, (size_t)len);
+    }
+
+    if (cmd.type == WS_CMD_WS_INIT) {
+        char path[512];
+        snprintf(path, sizeof(path), "data/segments/%d/init-stream0.m4s", cmd.video_id);
+        if (send_ws_file(fd, path, "INIT", 0) != 0) {
+            return send_json_response(fd, "error", "not_found", "init-missing");
+        }
+        return send_json_response(fd, "ws_init", "ok", "init-sent");
+    }
+
+    if (cmd.type == WS_CMD_WS_SEGMENT) {
+        char path[512];
+        snprintf(path, sizeof(path), "data/segments/%d/chunk-stream0-%05d.m4s", cmd.video_id, cmd.segment_index);
+        if (send_ws_file(fd, path, "SEGM", (uint32_t)cmd.segment_index) != 0) {
+            return send_json_response(fd, "error", "not_found", "segment-missing");
+        }
+        return send_json_response(fd, "ws_segment", "ok", "segment-sent");
     }
 
     if (cmd.type == WS_CMD_WATCH_GET) {
