@@ -11,6 +11,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #define WS_GUID "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -81,6 +82,10 @@ void websocket_context_destroy(websocket_context_t *ctx) {
 }
 
 int websocket_handle_client(int client_fd, websocket_context_t *ctx) {
+    struct timeval tv = {.tv_sec = 5, .tv_usec = 0};
+    setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
     char buffer[WS_MAX_HTTP_BUFFER];
     size_t received = 0;
     if (read_http_request(client_fd, buffer, sizeof(buffer), &received) != 0) {
@@ -108,7 +113,10 @@ int websocket_handle_client(int client_fd, websocket_context_t *ctx) {
         return -1;
     }
 
-    send_json_response(client_fd, "ready", "ok", "websocket-ready");
+    if (send_json_response(client_fd, "ready", "ok", "websocket-ready") != 0) {
+        close(client_fd);
+        return -1;
+    }
 
     while (1) {
         ws_frame_t frame = {0};

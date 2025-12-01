@@ -6,6 +6,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <sys/time.h>
 
 static int contains_sequence(const char *buffer, size_t len, const char *sequence, size_t seq_len) {
     if (seq_len == 0 || len < seq_len) {
@@ -23,14 +24,16 @@ static void read_until_sequence(int fd, const char *sequence) {
     size_t seq_len = strlen(sequence);
     char buffer[512];
     size_t total = 0;
+
     while (total < sizeof(buffer)) {
-        ssize_t n = recv(fd, buffer + total, sizeof(buffer) - total, 0);
-        assert(n > 0);
-        total += (size_t)n;
-        if (contains_sequence(buffer, total, sequence, seq_len)) {
+        ssize_t n = recv(fd, buffer + total, 1, 0);
+        assert(n == 1);
+        total += 1;
+        if (total >= seq_len && contains_sequence(buffer, total, sequence, seq_len)) {
             return;
         }
     }
+
     assert(!"sequence not found");
 }
 
@@ -47,6 +50,10 @@ static void expect_text_frame(int fd, char *buffer, size_t buf_size) {
 static void websocket_client_ping(uint16_t port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     assert(fd >= 0);
+
+    struct timeval tv = {.tv_sec = 5, .tv_usec = 0};
+    assert(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0);
+    assert(setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) == 0);
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));

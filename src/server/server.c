@@ -42,6 +42,7 @@ int server_init(server_ctx_t *ctx, const char *bind_ip, uint16_t port, int max_c
     ctx->port = port;
     strncpy(ctx->bind_ip, bind_ip, sizeof(ctx->bind_ip) - 1);
     pthread_mutex_init(&ctx->lock, NULL);
+    pthread_cond_init(&ctx->clients_cv, NULL);
     ctx->ws_context = NULL;
 
     ctx->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -115,6 +116,12 @@ void server_join(server_ctx_t *ctx) {
     }
 
     pthread_join(ctx->accept_thread, NULL);
+
+    pthread_mutex_lock(&ctx->lock);
+    while (ctx->client_count > 0) {
+        pthread_cond_wait(&ctx->clients_cv, &ctx->lock);
+    }
+    pthread_mutex_unlock(&ctx->lock);
 }
 
 void server_destroy(server_ctx_t *ctx) {
@@ -124,6 +131,7 @@ void server_destroy(server_ctx_t *ctx) {
 
     server_close_socket(&ctx->listen_fd);
     pthread_mutex_destroy(&ctx->lock);
+    pthread_cond_destroy(&ctx->clients_cv);
     memset(ctx, 0, sizeof(*ctx));
 }
 
@@ -213,6 +221,7 @@ static void *client_worker(void *arg) {
     if (ctx->client_count > 0) {
         ctx->client_count--;
     }
+    pthread_cond_signal(&ctx->clients_cv);
     pthread_mutex_unlock(&ctx->lock);
 
     return NULL;

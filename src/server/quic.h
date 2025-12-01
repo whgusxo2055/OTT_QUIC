@@ -21,6 +21,14 @@ extern "C" {
 #define QUIC_FLAG_HANDSHAKE 0x02
 #define QUIC_FLAG_DATA      0x04
 #define QUIC_FLAG_ACK       0x08
+#define QUIC_FLAG_CLOSE     0x10
+
+typedef enum {
+    QUIC_CONN_STATE_IDLE = 0,
+    QUIC_CONN_STATE_CONNECTING,
+    QUIC_CONN_STATE_CONNECTED,
+    QUIC_CONN_STATE_CLOSED
+} quic_connection_state_t;
 
 typedef struct {
     uint8_t flags;
@@ -39,6 +47,7 @@ typedef struct {
     uint64_t connection_id;
     struct sockaddr_in addr;
     time_t last_seen;
+    quic_connection_state_t state;
     int in_use;
 } quic_connection_entry_t;
 
@@ -64,6 +73,7 @@ void quic_engine_destroy(quic_engine_t *engine);
 int quic_engine_send(const quic_engine_t *engine, const quic_packet_t *packet, const struct sockaddr_in *addr);
 int quic_engine_send_to_connection(quic_engine_t *engine, const quic_packet_t *packet);
 int quic_engine_get_connection(quic_engine_t *engine, uint64_t connection_id, struct sockaddr_in *addr_out);
+int quic_engine_close_connection(quic_engine_t *engine, uint64_t connection_id);
 
 #ifdef __cplusplus
 }

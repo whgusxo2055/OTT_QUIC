@@ -16,6 +16,7 @@ typedef struct server_ctx {
     int listen_fd;
     pthread_t accept_thread;
     pthread_mutex_t lock;
+    pthread_cond_t clients_cv;
     int running;
     int client_count;
     int max_clients;
