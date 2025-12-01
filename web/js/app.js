@@ -4,6 +4,9 @@ let sessionId = null;
 let currentVideo = null;
 let connectionId = 0;
 let streamId = 1;
+let totalBytes = 0;
+let chunkSize = 1024 * 1024;
+let durationMs = 0;
 
 function log(msg) {
   const el = document.getElementById('log');
@@ -15,7 +18,12 @@ function connect() {
   socket = new WebSocket(wsUrl);
   socket.onopen = () => log('WebSocket connected');
   socket.onmessage = (ev) => {
-    log(`recv: ${ev.data}`);
+    try {
+      const data = JSON.parse(ev.data);
+      handleMessage(data);
+    } catch (e) {
+      log(`recv: ${ev.data}`);
+    }
   };
   socket.onerror = (err) => log('ws error ' + err);
   socket.onclose = () => log('WebSocket closed');
@@ -35,6 +43,7 @@ async function login() {
   const res = await fetch('http://' + location.hostname + ':8080/login', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
+    credentials: 'include',
     body: JSON.stringify({username: user, password: pass}),
   });
   if (!res.ok) {
@@ -50,6 +59,7 @@ async function login() {
 async function logout() {
   await fetch('http://' + location.hostname + ':8080/logout', {
     method: 'GET',
+    credentials: 'include',
     headers: sessionId ? {'Authorization': 'Bearer ' + sessionId} : {},
   });
   sessionId = null;
@@ -139,9 +149,78 @@ function watchSet() {
 document.getElementById('login-btn').onclick = login;
 document.getElementById('logout-btn').onclick = logout;
 document.getElementById('refresh-btn').onclick = refreshVideos;
+document.getElementById('start-btn').onclick = startStream;
 document.getElementById('seek-btn').onclick = seekStream;
 document.getElementById('stop-btn').onclick = stopStream;
 document.getElementById('watch-get-btn').onclick = watchGet;
 document.getElementById('watch-set-btn').onclick = watchSet;
 
 connect();
+
+function handleMessage(msg) {
+  if (!msg || !msg.type) {
+    log('unknown message');
+    return;
+  }
+  switch (msg.type) {
+    case 'videos':
+      renderVideoList(msg.items || []);
+      break;
+    case 'video_detail':
+      renderDetail(msg);
+      break;
+    case 'watch_get':
+      if (msg.status === 'ok' && typeof msg.position === 'number') {
+        document.getElementById('watch-pos').value = msg.position;
+      }
+      log(JSON.stringify(msg));
+      break;
+    case 'watch_update':
+    case 'stream_chunk':
+    case 'stream_stop':
+    case 'stream_seek':
+      log(JSON.stringify(msg));
+      break;
+    case 'stream_start':
+      if (msg.status === 'ok') {
+        totalBytes = msg.total_bytes || 0;
+        chunkSize = msg.chunk_size || chunkSize;
+        connectionId = msg.connection_id || connectionId;
+        streamId = msg.stream_id || streamId;
+        durationMs = (msg.duration || 0) * 1000;
+        updateMeta();
+      }
+      log(JSON.stringify(msg));
+      break;
+    default:
+      log(JSON.stringify(msg));
+      break;
+  }
+}
+
+function renderVideoList(items) {
+  const ul = document.getElementById('video-list');
+  ul.innerHTML = '';
+  items.forEach((item) => {
+    const li = document.createElement('li');
+    li.textContent = `${item.id} - ${item.title}`;
+    li.onclick = () => selectVideo(item.id);
+    ul.appendChild(li);
+  });
+}
+
+function renderDetail(d) {
+  document.getElementById('detail-title').textContent = d.title || '-';
+  document.getElementById('detail-desc').textContent = d.description || '-';
+  document.getElementById('detail-duration').textContent = d.duration || '-';
+  document.getElementById('detail-file').textContent = d.file_path || '-';
+  document.getElementById('detail-thumb').textContent = d.thumbnail_path || '-';
+}
+
+function updateMeta() {
+  document.getElementById('meta-conn').textContent = connectionId || '-';
+  document.getElementById('meta-stream').textContent = streamId || '-';
+  document.getElementById('meta-bytes').textContent = totalBytes || '-';
+  document.getElementById('meta-chunk').textContent = chunkSize || '-';
+  document.getElementById('seek-offset').value = 0;
+}
