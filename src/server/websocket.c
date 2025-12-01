@@ -40,7 +40,9 @@ typedef enum {
     WS_CMD_STREAM_START,
     WS_CMD_STREAM_CHUNK,
     WS_CMD_WATCH_GET,
-    WS_CMD_WATCH_UPDATE
+    WS_CMD_WATCH_UPDATE,
+    WS_CMD_STREAM_SEEK,
+    WS_CMD_STREAM_STOP
 } ws_command_type;
 
 typedef struct {
@@ -55,6 +57,7 @@ typedef struct {
     uint32_t length;
     int user_id;
     int position;
+    uint32_t seek_offset;
 } ws_command_t;
 
 static int read_http_request(int fd, char *buffer, size_t buf_size, size_t *out_len);

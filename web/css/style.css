@@ -1,0 +1,89 @@
+body {
+  font-family: 'Segoe UI', sans-serif;
+  margin: 0;
+  padding: 0;
+  background: linear-gradient(135deg, #0f172a, #1e293b);
+  color: #e2e8f0;
+}
+
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+h1 {
+  margin: 0;
+}
+
+.auth input {
+  margin-right: 8px;
+  padding: 6px;
+}
+
+button {
+  padding: 6px 10px;
+  margin-right: 6px;
+  cursor: pointer;
+  background: #22d3ee;
+  border: none;
+  color: #0f172a;
+  border-radius: 4px;
+}
+
+.lists {
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  gap: 16px;
+}
+
+.panel {
+  background: rgba(255, 255, 255, 0.06);
+  padding: 12px;
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+}
+
+#video-list {
+  list-style: none;
+  padding: 0;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+#video-list li {
+  padding: 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.1);
+  cursor: pointer;
+}
+
+#video-list li:hover {
+  background: rgba(255,255,255,0.08);
+}
+
+.controls, .watch {
+  margin-top: 10px;
+}
+
+.controls input, .watch input {
+  width: 120px;
+}
+
+.log {
+  margin-top: 12px;
+}
+
+#log {
+  background: #0b1220;
+  padding: 10px;
+  height: 200px;
+  overflow-y: auto;
+  color: #a5b4fc;
+}
