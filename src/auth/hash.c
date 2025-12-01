@@ -1,25 +1,32 @@
 #include "auth/hash.h"
+#include "auth/bcrypt.h"
 
-#include <stdint.h>
-#include <stdio.h>
 #include <string.h>
 
+#define BCRYPT_WORKFACTOR 12
+
 void hash_password(const char *password, char *out_hex, size_t out_size) {
-    if (!out_hex || out_size < HASH_HEX_SIZE) {
+    if (!password || !out_hex || out_size < HASH_HEX_SIZE) {
         return;
     }
 
-    const uint64_t fnv_prime = 1099511628211ULL;
-    uint64_t hash = 1469598103934665603ULL ^ 0x9e3779b97f4a7c15ULL;
+    char salt[BCRYPT_HASHSIZE];
+    char hash[BCRYPT_HASHSIZE];
 
-    if (password) {
-        size_t len = strlen(password);
-        for (size_t i = 0; i < len; ++i) {
-            hash ^= (uint64_t)(unsigned char)password[i];
-            hash *= fnv_prime;
-            hash ^= (uint64_t)i + 0x100000001b3ULL;
-        }
+    if (bcrypt_gensalt(BCRYPT_WORKFACTOR, salt) != 0) {
+        return;
     }
+    if (bcrypt_hashpw(password, salt, hash) != 0) {
+        return;
+    }
+    strncpy(out_hex, hash, out_size - 1);
+    out_hex[out_size - 1] = '\0';
+}
 
-    snprintf(out_hex, out_size, "%016llx", (unsigned long long)hash);
+int verify_password(const char *password, const char *hash_hex) {
+    if (!password || !hash_hex) {
+        return -1;
+    }
+    int rc = bcrypt_checkpw(password, hash_hex);
+    return rc == 0 ? 0 : -1;
 }

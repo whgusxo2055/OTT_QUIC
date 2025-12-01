@@ -22,6 +22,14 @@ typedef struct {
 
 typedef struct {
     int id;
+    int user_id;
+    char session_id[65];
+    char created_at[DB_MAX_TIMESTAMP];
+    char expires_at[DB_MAX_TIMESTAMP];
+} db_session_t;
+
+typedef struct {
+    int id;
     char username[DB_MAX_USERNAME];
     char nickname[DB_MAX_NICKNAME];
     char password_hash[DB_MAX_PATH];
@@ -71,6 +79,11 @@ int db_delete_video_by_id(db_context_t *ctx, int video_id);
 int db_upsert_watch_history(db_context_t *ctx, int user_id, int video_id, int last_position);
 int db_get_watch_history(db_context_t *ctx, int user_id, int video_id, db_watch_history_t *out_history);
 int db_delete_watch_history(db_context_t *ctx, int user_id, int video_id);
+
+int db_create_session(db_context_t *ctx, int user_id, const char *session_id, int ttl_seconds);
+int db_get_session(db_context_t *ctx, const char *session_id, db_session_t *out_session);
+int db_delete_session(db_context_t *ctx, const char *session_id);
+int db_delete_expired_sessions(db_context_t *ctx);
 
 #ifdef __cplusplus
 }

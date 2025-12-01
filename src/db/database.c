@@ -67,6 +67,14 @@ int db_initialize_schema(db_context_t *ctx) {
         " password_hash TEXT NOT NULL,"
         " created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
         ");"
+        "CREATE TABLE IF NOT EXISTS sessions ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " user_id INTEGER NOT NULL,"
+        " session_id TEXT NOT NULL UNIQUE,"
+        " created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        " expires_at DATETIME NOT NULL,"
+        " FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE"
+        ");"
         "CREATE TABLE IF NOT EXISTS videos ("
         " id INTEGER PRIMARY KEY AUTOINCREMENT,"
         " title TEXT NOT NULL,"
@@ -377,4 +385,101 @@ int db_delete_watch_history(db_context_t *ctx, int user_id, int video_id) {
 
     sqlite3_finalize(stmt);
     return rc;
+}
+
+int db_create_session(db_context_t *ctx, int user_id, const char *session_id, int ttl_seconds) {
+    if (!ctx || !ctx->conn || !session_id) {
+        return SQLITE_MISUSE;
+    }
+
+    const char *sql =
+        "INSERT INTO sessions (user_id, session_id, expires_at) "
+        "VALUES (?, ?, datetime('now', ?));";
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(ctx->conn, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        return rc;
+    }
+
+    char ttl_str[32];
+    snprintf(ttl_str, sizeof(ttl_str), "+%d seconds", ttl_seconds);
+
+    sqlite3_bind_int(stmt, 1, user_id);
+    sqlite3_bind_text(stmt, 2, session_id, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, ttl_str, -1, SQLITE_TRANSIENT);
+
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_DONE) {
+        rc = SQLITE_OK;
+    }
+
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+int db_get_session(db_context_t *ctx, const char *session_id, db_session_t *out_session) {
+    if (!ctx || !ctx->conn || !session_id || !out_session) {
+        return SQLITE_MISUSE;
+    }
+
+    const char *sql =
+        "SELECT id, user_id, session_id, IFNULL(created_at,''), IFNULL(expires_at,'') "
+        "FROM sessions WHERE session_id = ? AND expires_at > datetime('now');";
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(ctx->conn, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        return rc;
+    }
+
+    sqlite3_bind_text(stmt, 1, session_id, -1, SQLITE_TRANSIENT);
+
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        memset(out_session, 0, sizeof(*out_session));
+        out_session->id = sqlite3_column_int(stmt, 0);
+        out_session->user_id = sqlite3_column_int(stmt, 1);
+        copy_column_text(stmt, 2, out_session->session_id, sizeof(out_session->session_id));
+        copy_column_text(stmt, 3, out_session->created_at, sizeof(out_session->created_at));
+        copy_column_text(stmt, 4, out_session->expires_at, sizeof(out_session->expires_at));
+        rc = SQLITE_OK;
+    } else if (rc == SQLITE_DONE) {
+        rc = SQLITE_NOTFOUND;
+    }
+
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+int db_delete_session(db_context_t *ctx, const char *session_id) {
+    if (!ctx || !ctx->conn || !session_id) {
+        return SQLITE_MISUSE;
+    }
+
+    const char *sql = "DELETE FROM sessions WHERE session_id = ?;";
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(ctx->conn, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        return rc;
+    }
+
+    sqlite3_bind_text(stmt, 1, session_id, -1, SQLITE_TRANSIENT);
+
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_DONE) {
+        rc = SQLITE_OK;
+    }
+
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+int db_delete_expired_sessions(db_context_t *ctx) {
+    if (!ctx || !ctx->conn) {
+        return SQLITE_MISUSE;
+    }
+
+    const char *sql = "DELETE FROM sessions WHERE expires_at <= datetime('now');";
+    return exec_sql(ctx->conn, sql);
 }

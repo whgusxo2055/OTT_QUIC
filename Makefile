@@ -1,6 +1,6 @@
 CC := gcc
 CFLAGS := -Wall -Wextra -Werror -std=c11 -pedantic -pthread
-CPPFLAGS := -Isrc
+CPPFLAGS := -Isrc -Isrc/auth
 LDFLAGS :=
 LDLIBS := -lsqlite3 -pthread
 
@@ -18,7 +18,8 @@ TEST_BINS := \
 	$(BUILD_DIR)/tests/websocket_utils_test \
 	$(BUILD_DIR)/tests/quic_packet_test \
 	$(BUILD_DIR)/tests/quic_engine_test \
-	$(BUILD_DIR)/tests/quic_stream_test
+	$(BUILD_DIR)/tests/quic_stream_test \
+	$(BUILD_DIR)/tests/auth_session_test
 
 .PHONY: all clean run test
 
@@ -53,6 +54,10 @@ $(BUILD_DIR)/tests/quic_engine_test: tests/quic_engine_test.c $(LIB_OBJ_FILES)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
 
 $(BUILD_DIR)/tests/quic_stream_test: tests/quic_stream_test.c $(LIB_OBJ_FILES)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
+
+$(BUILD_DIR)/tests/auth_session_test: tests/auth_session_test.c $(LIB_OBJ_FILES)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $^ -o $@ $(LDFLAGS) $(LDLIBS)
 
