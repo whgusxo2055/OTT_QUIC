@@ -7,6 +7,8 @@
 #include <stdint.h>
 #include <time.h>
 
+#include "server/quic_stream.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -42,6 +44,23 @@ typedef struct {
 
 struct quic_engine;
 typedef void (*quic_packet_handler)(const quic_packet_t *packet, const struct sockaddr_in *addr, void *user_data);
+typedef void (*quic_stream_data_handler)(uint64_t connection_id,
+                                         uint32_t stream_id,
+                                         uint32_t offset,
+                                         const uint8_t *data,
+                                         size_t len,
+                                         void *user_data);
+typedef void (*quic_state_handler)(uint64_t connection_id,
+                                   quic_connection_state_t state,
+                                   const struct sockaddr_in *addr,
+                                   void *user_data);
+
+typedef struct {
+    uint64_t packets_received;
+    uint64_t packets_sent;
+    uint64_t connections_opened;
+    uint64_t connections_closed;
+} quic_metrics_t;
 
 typedef struct {
     uint64_t connection_id;
@@ -49,6 +68,7 @@ typedef struct {
     time_t last_seen;
     quic_connection_state_t state;
     int in_use;
+    quic_stream_manager_t stream_mgr;
 } quic_connection_entry_t;
 
 typedef struct quic_engine {
@@ -59,6 +79,12 @@ typedef struct quic_engine {
     int running;
     quic_packet_handler handler;
     void *user_data;
+    quic_stream_data_handler stream_handler;
+    void *stream_user_data;
+    quic_state_handler state_handler;
+    void *state_user_data;
+    uint32_t recv_timeout_sec;
+    quic_metrics_t metrics;
     quic_connection_entry_t connections[QUIC_MAX_CONNECTIONS];
 } quic_engine_t;
 
@@ -74,6 +100,11 @@ int quic_engine_send(const quic_engine_t *engine, const quic_packet_t *packet, c
 int quic_engine_send_to_connection(quic_engine_t *engine, const quic_packet_t *packet);
 int quic_engine_get_connection(quic_engine_t *engine, uint64_t connection_id, struct sockaddr_in *addr_out);
 int quic_engine_close_connection(quic_engine_t *engine, uint64_t connection_id);
+int quic_engine_get_connection_state(const quic_engine_t *engine, uint64_t connection_id, quic_connection_state_t *out_state);
+void quic_engine_set_state_handler(quic_engine_t *engine, quic_state_handler handler, void *user_data);
+void quic_engine_set_recv_timeout(quic_engine_t *engine, uint32_t seconds);
+void quic_engine_set_stream_data_handler(quic_engine_t *engine, quic_stream_data_handler handler, void *user_data);
+void quic_engine_get_metrics(const quic_engine_t *engine, quic_metrics_t *out_metrics);
 
 #ifdef __cplusplus
 }

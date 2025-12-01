@@ -18,6 +18,9 @@ typedef struct {
     int received;
     quic_packet_t packet;
     uint8_t payload_copy[QUIC_MAX_PAYLOAD];
+    uint8_t stream_buf[QUIC_MAX_PAYLOAD];
+    size_t stream_len;
+    uint32_t stream_offset;
 } handler_state_t;
 
 static void packet_handler(const quic_packet_t *packet, const struct sockaddr_in *addr, void *user_data) {
@@ -37,13 +40,23 @@ static void packet_handler(const quic_packet_t *packet, const struct sockaddr_in
     pthread_mutex_unlock(&state->lock);
 }
 
+static void stream_handler(uint64_t connection_id, uint32_t stream_id, uint32_t offset, const uint8_t *data, size_t len, void *user_data) {
+    (void)connection_id;
+    (void)stream_id;
+    handler_state_t *state = (handler_state_t *)user_data;
+    pthread_mutex_lock(&state->lock);
+    memcpy(state->stream_buf, data, len);
+    state->stream_len = len;
+    state->stream_offset = offset;
+    pthread_mutex_unlock(&state->lock);
+}
+
 static int wait_for_packet(handler_state_t *state) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     ts.tv_sec += 1;
 
     pthread_mutex_lock(&state->lock);
-    state->received = 0;
     while (!state->received) {
         int rc = pthread_cond_timedwait(&state->cond, &state->lock, &ts);
         if (rc == ETIMEDOUT) {
@@ -64,12 +77,16 @@ int main(void) {
     quic_engine_t engine;
     const uint16_t port = 18443;
     assert(quic_engine_init(&engine, port, packet_handler, &state) == 0);
+    quic_engine_set_stream_data_handler(&engine, stream_handler, &state);
     assert(quic_engine_start(&engine) == 0);
 
-    int client_fd = socket(AF_INET, SOCK_DGRAM, 0);
-    assert(client_fd >= 0);
+    int client_fd1 = socket(AF_INET, SOCK_DGRAM, 0);
+    assert(client_fd1 >= 0);
+    int client_fd2 = socket(AF_INET, SOCK_DGRAM, 0);
+    assert(client_fd2 >= 0);
     struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
-    assert(setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0);
+    assert(setsockopt(client_fd1, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0);
+    assert(setsockopt(client_fd2, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0);
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -78,69 +95,147 @@ int main(void) {
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
 
     uint8_t payload[] = {0x10, 0x20, 0x30};
-    const uint64_t conn_id = 0xABCDEFULL;
+    const uint64_t conn_id1 = 0xABCDEFULL;
+    const uint64_t conn_id2 = 0x123456ULL;
 
     uint8_t buffer[QUIC_MAX_PACKET_SIZE];
     size_t len = 0;
-    quic_packet_t initial_packet = {
+    quic_packet_t initial_packet1 = {
         .flags = QUIC_FLAG_INITIAL,
-        .connection_id = conn_id,
+        .connection_id = conn_id1,
         .packet_number = 0,
         .stream_id = 0,
         .offset = 0,
         .length = 0,
         .payload = NULL,
     };
-    assert(quic_packet_serialize(&initial_packet, buffer, sizeof(buffer), &len) == 0);
-    assert(sendto(client_fd, buffer, len, 0, (struct sockaddr *)&addr, sizeof(addr)) == (ssize_t)len);
+    assert(quic_packet_serialize(&initial_packet1, buffer, sizeof(buffer), &len) == 0);
+    assert(sendto(client_fd1, buffer, len, 0, (struct sockaddr *)&addr, sizeof(addr)) == (ssize_t)len);
 
     uint8_t recv_buf[QUIC_MAX_PACKET_SIZE];
-    ssize_t recv_len = recvfrom(client_fd, recv_buf, sizeof(recv_buf), 0, NULL, NULL);
+    ssize_t recv_len = recvfrom(client_fd1, recv_buf, sizeof(recv_buf), 0, NULL, NULL);
     assert(recv_len > 0);
     quic_packet_t handshake_resp;
     assert(quic_packet_deserialize(&handshake_resp, recv_buf, (size_t)recv_len) == 0);
     assert(handshake_resp.flags & QUIC_FLAG_HANDSHAKE);
-    assert(handshake_resp.connection_id == conn_id);
+    assert(handshake_resp.connection_id == conn_id1);
 
-    quic_packet_t handshake_packet = {
+    quic_packet_t handshake_packet1 = {
         .flags = QUIC_FLAG_HANDSHAKE,
-        .connection_id = conn_id,
+        .connection_id = conn_id1,
         .packet_number = 1,
         .stream_id = 0,
         .offset = 0,
         .length = 0,
         .payload = NULL,
     };
-    assert(quic_packet_serialize(&handshake_packet, buffer, sizeof(buffer), &len) == 0);
-    assert(sendto(client_fd, buffer, len, 0, (struct sockaddr *)&addr, sizeof(addr)) == (ssize_t)len);
+    assert(quic_packet_serialize(&handshake_packet1, buffer, sizeof(buffer), &len) == 0);
+    assert(sendto(client_fd1, buffer, len, 0, (struct sockaddr *)&addr, sizeof(addr)) == (ssize_t)len);
 
-    quic_packet_t data_packet = {
+    quic_packet_t data_packet1 = {
         .flags = QUIC_FLAG_DATA,
-        .connection_id = conn_id,
+        .connection_id = conn_id1,
         .packet_number = 7,
         .stream_id = 2,
         .offset = 0,
         .length = sizeof(payload),
         .payload = payload,
     };
-    assert(quic_packet_serialize(&data_packet, buffer, sizeof(buffer), &len) == 0);
-    assert(sendto(client_fd, buffer, len, 0, (struct sockaddr *)&addr, sizeof(addr)) == (ssize_t)len);
+    assert(quic_packet_serialize(&data_packet1, buffer, sizeof(buffer), &len) == 0);
+    assert(sendto(client_fd1, buffer, len, 0, (struct sockaddr *)&addr, sizeof(addr)) == (ssize_t)len);
+
+    ssize_t ack_len = recvfrom(client_fd1, recv_buf, sizeof(recv_buf), 0, NULL, NULL);
+    assert(ack_len > 0);
+    quic_packet_t ack_pkt;
+    assert(quic_packet_deserialize(&ack_pkt, recv_buf, (size_t)ack_len) == 0);
+    assert(ack_pkt.flags & QUIC_FLAG_ACK);
 
     assert(wait_for_packet(&state) == 0);
-    assert(state.packet.connection_id == data_packet.connection_id);
-    assert(state.packet.packet_number == data_packet.packet_number);
+    assert(state.packet.connection_id == data_packet1.connection_id);
+    assert(state.packet.packet_number == data_packet1.packet_number);
+    assert(state.stream_len == sizeof(payload));
+    assert(state.stream_offset == 0);
+    assert(memcmp(state.stream_buf, payload, sizeof(payload)) == 0);
 
     struct sockaddr_in stored_addr;
-    assert(quic_engine_get_connection(&engine, conn_id, &stored_addr) == 0);
+    assert(quic_engine_get_connection(&engine, conn_id1, &stored_addr) == 0);
     struct sockaddr_in local_addr;
     socklen_t local_len = sizeof(local_addr);
-    assert(getsockname(client_fd, (struct sockaddr *)&local_addr, &local_len) == 0);
+    assert(getsockname(client_fd1, (struct sockaddr *)&local_addr, &local_len) == 0);
     assert(ntohs(stored_addr.sin_port) == ntohs(local_addr.sin_port));
 
-    assert(quic_engine_close_connection(&engine, conn_id) == 0);
-    assert(quic_engine_get_connection(&engine, conn_id, &stored_addr) == -1);
+    /* 두 번째 연결: 별도 소켓/연결 ID */
+    quic_packet_t initial_packet2 = {
+        .flags = QUIC_FLAG_INITIAL,
+        .connection_id = conn_id2,
+        .packet_number = 0,
+        .stream_id = 0,
+        .offset = 0,
+        .length = 0,
+        .payload = NULL,
+    };
+    assert(quic_packet_serialize(&initial_packet2, buffer, sizeof(buffer), &len) == 0);
+    assert(sendto(client_fd2, buffer, len, 0, (struct sockaddr *)&addr, sizeof(addr)) == (ssize_t)len);
 
-    close(client_fd);
+    recv_len = recvfrom(client_fd2, recv_buf, sizeof(recv_buf), 0, NULL, NULL);
+    assert(recv_len > 0);
+    assert(quic_packet_deserialize(&handshake_resp, recv_buf, (size_t)recv_len) == 0);
+    assert(handshake_resp.connection_id == conn_id2);
+
+    quic_packet_t handshake_packet2 = {
+        .flags = QUIC_FLAG_HANDSHAKE,
+        .connection_id = conn_id2,
+        .packet_number = 1,
+        .stream_id = 0,
+        .offset = 0,
+        .length = 0,
+        .payload = NULL,
+    };
+    assert(quic_packet_serialize(&handshake_packet2, buffer, sizeof(buffer), &len) == 0);
+    assert(sendto(client_fd2, buffer, len, 0, (struct sockaddr *)&addr, sizeof(addr)) == (ssize_t)len);
+
+    quic_packet_t data_packet2 = {
+        .flags = QUIC_FLAG_DATA,
+        .connection_id = conn_id2,
+        .packet_number = 3,
+        .stream_id = 1,
+        .offset = 0,
+        .length = sizeof(payload),
+        .payload = payload,
+    };
+    assert(quic_packet_serialize(&data_packet2, buffer, sizeof(buffer), &len) == 0);
+    assert(sendto(client_fd2, buffer, len, 0, (struct sockaddr *)&addr, sizeof(addr)) == (ssize_t)len);
+
+    pthread_mutex_lock(&state.lock);
+    state.received = 0;
+    pthread_mutex_unlock(&state.lock);
+
+    assert(wait_for_packet(&state) == 0);
+    assert(state.packet.connection_id == data_packet2.connection_id);
+    assert(state.packet.packet_number == data_packet2.packet_number);
+    assert(state.stream_len == sizeof(payload));
+
+    /* 타임아웃 정리 검증 */
+    pthread_mutex_lock(&engine.lock);
+    quic_connection_entry_t *entry = NULL;
+    for (int i = 0; i < QUIC_MAX_CONNECTIONS; ++i) {
+        if (engine.connections[i].in_use && engine.connections[i].connection_id == conn_id1) {
+            entry = &engine.connections[i];
+            break;
+        }
+    }
+    assert(entry);
+    entry->last_seen = time(NULL) - (QUIC_CONNECTION_TIMEOUT + 1);
+    pthread_mutex_unlock(&engine.lock);
+
+    assert(quic_engine_get_connection(&engine, conn_id1, &stored_addr) == -1);
+    assert(quic_engine_get_connection(&engine, conn_id2, &stored_addr) == 0);
+
+    assert(quic_engine_close_connection(&engine, conn_id2) == 0);
+    assert(quic_engine_get_connection(&engine, conn_id2, &stored_addr) == -1);
+
+    close(client_fd1);
+    close(client_fd2);
     quic_engine_stop(&engine);
     quic_engine_join(&engine);
     quic_engine_destroy(&engine);

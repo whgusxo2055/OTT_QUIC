@@ -6,9 +6,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+
+#include "server/quic_stream.h"
 
 static uint64_t host_to_be64(uint64_t value) {
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
@@ -32,10 +35,22 @@ static void quic_engine_cleanup_connections_locked(quic_engine_t *engine, time_t
 static int quic_engine_process_packet(quic_engine_t *engine,
                                       const quic_packet_t *packet,
                                       const struct sockaddr_in *addr,
-                                      int *handshake_needed);
+                                      int *handshake_needed,
+                                      quic_connection_state_t *state_changed,
+                                      struct sockaddr_in *state_addr);
 static void quic_engine_send_handshake(quic_engine_t *engine, const struct sockaddr_in *addr, uint64_t connection_id);
 static void quic_engine_send_close(quic_engine_t *engine, const struct sockaddr_in *addr, uint64_t connection_id);
 static void *quic_engine_loop(void *arg);
+static void quic_engine_emit_state(quic_engine_t *engine,
+                                   uint64_t connection_id,
+                                   quic_connection_state_t state,
+                                   const struct sockaddr_in *addr);
+static void quic_engine_emit_stream_data(quic_engine_t *engine,
+                                         uint64_t connection_id,
+                                         uint32_t stream_id,
+                                         uint32_t offset,
+                                         const uint8_t *data,
+                                         size_t len);
 
 static quic_connection_entry_t *quic_engine_find_entry_locked(quic_engine_t *engine, uint64_t connection_id) {
     for (int i = 0; i < QUIC_MAX_CONNECTIONS; ++i) {
@@ -54,6 +69,7 @@ static int quic_engine_add_connection_locked(quic_engine_t *engine, uint64_t con
             engine->connections[i].addr = *addr;
             engine->connections[i].last_seen = time(NULL);
             engine->connections[i].state = QUIC_CONN_STATE_CONNECTING;
+            quic_stream_manager_init(&engine->connections[i].stream_mgr);
             return 0;
         }
     }
@@ -63,7 +79,9 @@ static int quic_engine_add_connection_locked(quic_engine_t *engine, uint64_t con
 static int quic_engine_process_packet(quic_engine_t *engine,
                                       const quic_packet_t *packet,
                                       const struct sockaddr_in *addr,
-                                      int *handshake_needed) {
+                                      int *handshake_needed,
+                                      quic_connection_state_t *state_changed,
+                                      struct sockaddr_in *state_addr) {
     if (!engine || !packet || !addr) {
         return -1;
     }
@@ -88,6 +106,10 @@ static int quic_engine_process_packet(quic_engine_t *engine,
         if (handshake_needed) {
             *handshake_needed = 1;
         }
+        if (state_changed && state_addr) {
+            *state_changed = QUIC_CONN_STATE_CONNECTING;
+            *state_addr = *addr;
+        }
     } else {
         entry->addr = *addr;
         entry->last_seen = now;
@@ -96,18 +118,29 @@ static int quic_engine_process_packet(quic_engine_t *engine,
     if (packet->flags & QUIC_FLAG_CLOSE) {
         entry->state = QUIC_CONN_STATE_CLOSED;
         entry->in_use = 0;
+        quic_stream_manager_destroy(&entry->stream_mgr);
+        if (state_changed && state_addr) {
+            *state_changed = QUIC_CONN_STATE_CLOSED;
+            *state_addr = *addr;
+        }
         pthread_mutex_unlock(&engine->lock);
         return 0;
     }
 
     if (entry->state == QUIC_CONN_STATE_CONNECTING && (packet->flags & QUIC_FLAG_HANDSHAKE)) {
         entry->state = QUIC_CONN_STATE_CONNECTED;
+        if (state_changed && state_addr) {
+            *state_changed = QUIC_CONN_STATE_CONNECTED;
+            *state_addr = *addr;
+        }
     }
 
     int should_deliver = (entry->state == QUIC_CONN_STATE_CONNECTED) ||
                          (packet->flags & (QUIC_FLAG_INITIAL | QUIC_FLAG_HANDSHAKE));
 
-    (void)created;
+    if (created) {
+        engine->metrics.connections_opened++;
+    }
     pthread_mutex_unlock(&engine->lock);
     return should_deliver ? 0 : -1;
 }
@@ -220,6 +253,7 @@ int quic_engine_init(quic_engine_t *engine, uint16_t port, quic_packet_handler h
     engine->port = port;
     engine->handler = handler;
     engine->user_data = user_data;
+    engine->recv_timeout_sec = 1;
     pthread_mutex_init(&engine->lock, NULL);
 
     engine->sockfd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -242,6 +276,9 @@ int quic_engine_init(quic_engine_t *engine, uint16_t port, quic_packet_handler h
         pthread_mutex_destroy(&engine->lock);
         return -1;
     }
+
+    struct timeval tv = {.tv_sec = (time_t)engine->recv_timeout_sec, .tv_usec = 0};
+    setsockopt(engine->sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     engine->running = 1;
     return 0;
@@ -314,6 +351,9 @@ int quic_engine_send(const quic_engine_t *engine, const quic_packet_t *packet, c
     if (sent < 0 || (size_t)sent != len) {
         return -1;
     }
+    pthread_mutex_lock((pthread_mutex_t *)&engine->lock);
+    ((quic_engine_t *)engine)->metrics.packets_sent++;
+    pthread_mutex_unlock((pthread_mutex_t *)&engine->lock);
 
     return 0;
 }
@@ -369,8 +409,69 @@ int quic_engine_close_connection(quic_engine_t *engine, uint64_t connection_id) 
 
     if (found == 0) {
         quic_engine_send_close(engine, &addr, connection_id);
+        quic_engine_emit_state(engine, connection_id, QUIC_CONN_STATE_CLOSED, &addr);
     }
     return found;
+}
+
+int quic_engine_get_connection_state(const quic_engine_t *engine, uint64_t connection_id, quic_connection_state_t *out_state) {
+    if (!engine || !out_state) {
+        return -1;
+    }
+
+    int rc = -1;
+    pthread_mutex_lock((pthread_mutex_t *)&engine->lock);
+    const quic_connection_entry_t *entry = quic_engine_find_entry_locked((quic_engine_t *)engine, connection_id);
+    if (entry) {
+        *out_state = entry->state;
+        rc = 0;
+    }
+    pthread_mutex_unlock((pthread_mutex_t *)&engine->lock);
+    return rc;
+}
+
+void quic_engine_set_state_handler(quic_engine_t *engine, quic_state_handler handler, void *user_data) {
+    if (!engine) {
+        return;
+    }
+    pthread_mutex_lock(&engine->lock);
+    engine->state_handler = handler;
+    engine->state_user_data = user_data;
+    pthread_mutex_unlock(&engine->lock);
+}
+
+void quic_engine_set_stream_data_handler(quic_engine_t *engine, quic_stream_data_handler handler, void *user_data) {
+    if (!engine) {
+        return;
+    }
+    pthread_mutex_lock(&engine->lock);
+    engine->stream_handler = handler;
+    engine->stream_user_data = user_data;
+    pthread_mutex_unlock(&engine->lock);
+}
+
+void quic_engine_get_metrics(const quic_engine_t *engine, quic_metrics_t *out_metrics) {
+    if (!engine || !out_metrics) {
+        return;
+    }
+    pthread_mutex_lock((pthread_mutex_t *)&engine->lock);
+    *out_metrics = engine->metrics;
+    pthread_mutex_unlock((pthread_mutex_t *)&engine->lock);
+}
+
+void quic_engine_set_recv_timeout(quic_engine_t *engine, uint32_t seconds) {
+    if (!engine) {
+        return;
+    }
+    pthread_mutex_lock(&engine->lock);
+    engine->recv_timeout_sec = seconds;
+    int sock = engine->sockfd;
+    pthread_mutex_unlock(&engine->lock);
+
+    if (sock >= 0) {
+        struct timeval tv = {.tv_sec = (time_t)seconds, .tv_usec = 0};
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
 }
 
 static void quic_engine_cleanup_connections_locked(quic_engine_t *engine, time_t now) {
@@ -379,6 +480,7 @@ static void quic_engine_cleanup_connections_locked(quic_engine_t *engine, time_t
             (now - engine->connections[i].last_seen) > QUIC_CONNECTION_TIMEOUT) {
             engine->connections[i].in_use = 0;
             engine->connections[i].state = QUIC_CONN_STATE_CLOSED;
+            quic_stream_manager_destroy(&engine->connections[i].stream_mgr);
         }
     }
 }
@@ -401,9 +503,18 @@ static void *quic_engine_loop(void *arg) {
             if (errno == EINTR) {
                 continue;
             }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                pthread_mutex_lock(&engine->lock);
+                quic_engine_cleanup_connections_locked(engine, time(NULL));
+                pthread_mutex_unlock(&engine->lock);
+                continue;
+            }
             perror("recvfrom");
             continue;
         }
+        pthread_mutex_lock(&engine->lock);
+        engine->metrics.packets_received++;
+        pthread_mutex_unlock(&engine->lock);
 
         quic_packet_t packet;
         if (quic_packet_deserialize(&packet, buffer, (size_t)received) != 0) {
@@ -411,12 +522,56 @@ static void *quic_engine_loop(void *arg) {
         }
 
         int handshake_needed = 0;
-        if (quic_engine_process_packet(engine, &packet, &client_addr, &handshake_needed) != 0) {
+        quic_connection_state_t state_changed = QUIC_CONN_STATE_IDLE;
+        struct sockaddr_in state_addr;
+        if (quic_engine_process_packet(engine, &packet, &client_addr, &handshake_needed, &state_changed, &state_addr) != 0) {
             continue;
+        }
+
+        if (state_changed != QUIC_CONN_STATE_IDLE) {
+            quic_engine_emit_state(engine, packet.connection_id, state_changed, &state_addr);
         }
 
         if (handshake_needed) {
             quic_engine_send_handshake(engine, &client_addr, packet.connection_id);
+        }
+
+        if ((packet.flags & QUIC_FLAG_DATA) && engine->stream_handler) {
+            pthread_mutex_lock(&engine->lock);
+            quic_connection_entry_t *entry = quic_engine_find_entry_locked(engine, packet.connection_id);
+            pthread_mutex_unlock(&engine->lock);
+            if (entry) {
+                uint8_t assembled[QUIC_MAX_PAYLOAD];
+                size_t assembled_len = 0;
+                uint32_t out_offset = 0;
+                if (quic_stream_on_data(&entry->stream_mgr,
+                                        packet.stream_id,
+                                        packet.offset,
+                                        packet.payload,
+                                        packet.length,
+                                        assembled,
+                                        sizeof(assembled),
+                                        &out_offset,
+                                        &assembled_len) == 0 &&
+                    assembled_len > 0) {
+                    quic_engine_emit_stream_data(engine,
+                                                 packet.connection_id,
+                                                 packet.stream_id,
+                                                 out_offset,
+                                                 assembled,
+                                                 assembled_len);
+                }
+            }
+            quic_packet_t ack = {
+                .flags = QUIC_FLAG_ACK,
+                .connection_id = packet.connection_id,
+                .packet_number = packet.packet_number,
+                .stream_id = packet.stream_id,
+                .offset = packet.offset,
+                .length = 0,
+                .payload = NULL,
+            };
+            quic_engine_send(engine, &ack, &client_addr);
         }
 
         if (engine->handler) {
@@ -425,4 +580,38 @@ static void *quic_engine_loop(void *arg) {
     }
 
     return NULL;
+}
+
+static void quic_engine_emit_state(quic_engine_t *engine,
+                                   uint64_t connection_id,
+                                   quic_connection_state_t state,
+                                   const struct sockaddr_in *addr) {
+    quic_state_handler handler = NULL;
+    void *user_data = NULL;
+    pthread_mutex_lock(&engine->lock);
+    handler = engine->state_handler;
+    user_data = engine->state_user_data;
+    pthread_mutex_unlock(&engine->lock);
+
+    if (handler) {
+        handler(connection_id, state, addr, user_data);
+    }
+}
+
+static void quic_engine_emit_stream_data(quic_engine_t *engine,
+                                         uint64_t connection_id,
+                                         uint32_t stream_id,
+                                         uint32_t offset,
+                                         const uint8_t *data,
+                                         size_t len) {
+    quic_stream_data_handler handler = NULL;
+    void *user_data = NULL;
+    pthread_mutex_lock(&engine->lock);
+    handler = engine->stream_handler;
+    user_data = engine->stream_user_data;
+    pthread_mutex_unlock(&engine->lock);
+
+    if (handler) {
+        handler(connection_id, stream_id, offset, data, len, user_data);
+    }
 }

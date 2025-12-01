@@ -611,6 +611,24 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
             return send_json_response(fd, "error", "unavailable", "quic-engine-missing");
         }
 
+        quic_connection_state_t state;
+        if (quic_engine_get_connection_state(ctx->quic_engine, cmd.connection_id, &state) != 0) {
+            return send_json_response(fd, "error", "connection-not-found", "quic-connection-not-found");
+        }
+        if (state != QUIC_CONN_STATE_CONNECTED) {
+            const char *state_str = "unknown";
+            if (state == QUIC_CONN_STATE_CONNECTING) {
+                state_str = "connecting";
+            } else if (state == QUIC_CONN_STATE_CLOSED) {
+                state_str = "closed";
+            } else if (state == QUIC_CONN_STATE_IDLE) {
+                state_str = "idle";
+            }
+            char detail[128];
+            snprintf(detail, sizeof(detail), "quic-connection-not-ready(%s)", state_str);
+            return send_json_response(fd, "error", "connection-not-ready", detail);
+        }
+
         quic_packet_t packet = {
             .flags = QUIC_FLAG_DATA,
             .connection_id = cmd.connection_id,
