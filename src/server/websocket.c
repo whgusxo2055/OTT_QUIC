@@ -3,6 +3,7 @@
 #include "server/http.h"
 #include "auth/session.h"
 #include "db/database.h"
+#include "utils/thumbnail.h"
 
 #include <arpa/inet.h>
 #include <ctype.h>
@@ -13,12 +14,15 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
 
 #define WS_GUID "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 #define WS_MAX_HTTP_BUFFER 8192
 #define WS_MAX_FRAME_PAYLOAD (64 * 1024)
+#define STREAM_MAX_CHUNK (1024 * 1024)
+#define VIDEO_BASE_PATH "data/videos"
 
 typedef struct {
     uint8_t opcode;
@@ -32,7 +36,9 @@ typedef enum {
     WS_CMD_PING,
     WS_CMD_QUIC_SEND,
     WS_CMD_LIST_VIDEOS,
-    WS_CMD_VIDEO_DETAIL
+    WS_CMD_VIDEO_DETAIL,
+    WS_CMD_STREAM_START,
+    WS_CMD_STREAM_CHUNK
 } ws_command_type;
 
 typedef struct {
@@ -43,6 +49,8 @@ typedef struct {
     uint8_t payload[QUIC_MAX_PAYLOAD];
     size_t payload_len;
     int video_id;
+    uint32_t chunk_length;
+    uint32_t length;
 } ws_command_t;
 
 static int read_http_request(int fd, char *buffer, size_t buf_size, size_t *out_len);
@@ -71,6 +79,13 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
 static int handle_http_login(int fd, const http_request_t *req, websocket_context_t *ctx);
 static int handle_http_logout(int fd, const http_request_t *req, websocket_context_t *ctx);
 static int send_http_response(int fd, const char *status_line, const char *headers, const char *body);
+static int send_video_chunk(websocket_context_t *ctx,
+                            uint64_t connection_id,
+                            uint32_t stream_id,
+                            const char *file_path,
+                            uint32_t offset,
+                            uint32_t length,
+                            uint32_t *next_packet_number);
 
 void websocket_context_init(websocket_context_t *ctx, quic_engine_t *engine, db_context_t *db) {
     if (!ctx) {
@@ -89,6 +104,75 @@ void websocket_context_destroy(websocket_context_t *ctx) {
     }
     pthread_mutex_destroy(&ctx->lock);
     memset(ctx, 0, sizeof(*ctx));
+}
+
+static int send_video_chunk(websocket_context_t *ctx,
+                            uint64_t connection_id,
+                            uint32_t stream_id,
+                            const char *file_path,
+                            uint32_t offset,
+                            uint32_t length,
+                            uint32_t *next_packet_number) {
+    if (!ctx || !ctx->quic_engine || !file_path || !next_packet_number) {
+        return -1;
+    }
+
+    struct stat st;
+    if (stat(file_path, &st) != 0) {
+        return -1;
+    }
+    if (offset >= (uint32_t)st.st_size) {
+        return -1;
+    }
+
+    FILE *fp = fopen(file_path, "rb");
+    if (!fp) {
+        return -1;
+    }
+    if (fseek(fp, (long)offset, SEEK_SET) != 0) {
+        fclose(fp);
+        return -1;
+    }
+
+    uint32_t remaining = length;
+    uint32_t sent_bytes = 0;
+    uint8_t buffer[QUIC_MAX_PAYLOAD];
+
+    while (remaining > 0 && sent_bytes + offset < (uint32_t)st.st_size) {
+        size_t to_read = remaining;
+        if (to_read > QUIC_MAX_PAYLOAD) {
+            to_read = QUIC_MAX_PAYLOAD;
+        }
+        size_t n = fread(buffer, 1, to_read, fp);
+        if (n == 0) {
+            break;
+        }
+        quic_packet_t pkt = {
+            .flags = QUIC_FLAG_DATA,
+            .connection_id = connection_id,
+            .packet_number = (*next_packet_number)++,
+            .stream_id = stream_id,
+            .offset = offset + sent_bytes,
+            .length = (uint32_t)n,
+            .payload = buffer,
+        };
+        if (quic_engine_send_to_connection(ctx->quic_engine, &pkt) != 0) {
+            fclose(fp);
+            return -1;
+        }
+        sent_bytes += (uint32_t)n;
+        if (sent_bytes + offset >= (uint32_t)st.st_size) {
+            break;
+        }
+        if (remaining >= (uint32_t)n) {
+            remaining -= (uint32_t)n;
+        } else {
+            remaining = 0;
+        }
+    }
+
+    fclose(fp);
+    return 0;
 }
 
 int websocket_handle_client(int client_fd, websocket_context_t *ctx) {
@@ -874,6 +958,87 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
             return send_json_response(fd, "error", "internal_error", "response-too-large");
         }
         return ws_send_frame(fd, 0x1, (const uint8_t *)buf, (size_t)len);
+    }
+
+    if (cmd.type == WS_CMD_STREAM_START) {
+        if (!ctx || !ctx->db) {
+            return send_json_response(fd, "error", "unavailable", "db-missing");
+        }
+        db_video_t video;
+        if (db_get_video_by_id(ctx->db, cmd.video_id, &video) != SQLITE_OK) {
+            return send_json_response(fd, "error", "not_found", "video-not-found");
+        }
+        char full_path[512];
+        if (video.file_path[0] == '/') {
+            strncpy(full_path, video.file_path, sizeof(full_path) - 1);
+        } else {
+            snprintf(full_path, sizeof(full_path), "%s/%s", VIDEO_BASE_PATH, video.file_path);
+        }
+        struct stat st;
+        if (stat(full_path, &st) != 0) {
+            return send_json_response(fd, "error", "not_found", "file-missing");
+        }
+        double duration_sec = 0.0;
+        video_probe_duration(full_path, &duration_sec);
+        char resp[256];
+        int len = snprintf(resp,
+                           sizeof(resp),
+                           "{\"type\":\"stream_start\",\"status\":\"ok\",\"id\":%d,"
+                           "\"total_bytes\":%lld,\"chunk_size\":%u,\"duration\":%.2f,"
+                           "\"connection_id\":%llu,\"stream_id\":%u}",
+                           cmd.video_id,
+                           (long long)st.st_size,
+                           cmd.chunk_length,
+                           duration_sec,
+                           (unsigned long long)cmd.connection_id,
+                           cmd.stream_id);
+        if (len <= 0 || len >= (int)sizeof(resp)) {
+            return send_json_response(fd, "error", "internal_error", "response-too-large");
+        }
+        return ws_send_frame(fd, 0x1, (const uint8_t *)resp, (size_t)len);
+    }
+
+    if (cmd.type == WS_CMD_STREAM_CHUNK) {
+        if (!ctx || !ctx->db) {
+            return send_json_response(fd, "error", "unavailable", "db-missing");
+        }
+        db_video_t video;
+        if (db_get_video_by_id(ctx->db, cmd.video_id, &video) != SQLITE_OK) {
+            return send_json_response(fd, "error", "not_found", "video-not-found");
+        }
+        char full_path[512];
+        if (video.file_path[0] == '/') {
+            strncpy(full_path, video.file_path, sizeof(full_path) - 1);
+        } else {
+            snprintf(full_path, sizeof(full_path), "%s/%s", VIDEO_BASE_PATH, video.file_path);
+        }
+        uint32_t next_pn;
+        pthread_mutex_lock(&ctx->lock);
+        next_pn = ctx->next_packet_number;
+        pthread_mutex_unlock(&ctx->lock);
+        if (send_video_chunk(ctx,
+                             cmd.connection_id,
+                             cmd.stream_id,
+                             full_path,
+                             cmd.offset,
+                             cmd.length,
+                             &next_pn) != 0) {
+            return send_json_response(fd, "error", "stream_failed", "chunk-send-failed");
+        }
+        pthread_mutex_lock(&ctx->lock);
+        ctx->next_packet_number = next_pn;
+        pthread_mutex_unlock(&ctx->lock);
+
+        char resp[128];
+        int len = snprintf(resp,
+                           sizeof(resp),
+                           "{\"type\":\"stream_chunk\",\"status\":\"ok\",\"offset\":%u,\"length\":%u}",
+                           cmd.offset,
+                           cmd.length);
+        if (len <= 0 || len >= (int)sizeof(resp)) {
+            return send_json_response(fd, "error", "internal_error", "response-too-large");
+        }
+        return ws_send_frame(fd, 0x1, (const uint8_t *)resp, (size_t)len);
     }
 
     return send_json_response(fd, "error", "bad_request", "unsupported");
