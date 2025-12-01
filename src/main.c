@@ -1,6 +1,7 @@
 #include "server/server.h"
 #include "server/websocket.h"
 #include "server/quic.h"
+#include "db/database.h"
 
 #include <signal.h>
 #include <stdio.h>
@@ -30,13 +31,27 @@ int main(void) {
     quic_engine_t quic_engine;
     websocket_context_t ws_context;
     server_ctx_t server;
+    db_context_t db;
 
     int quic_initialized = 0;
     int quic_started = 0;
     int ws_initialized = 0;
     int server_initialized = 0;
     int server_started = 0;
+    int db_initialized = 0;
     int exit_code = 0;
+
+    if (db_init(&db, "data/ott.db") != SQLITE_OK) {
+        fputs("Failed to open DB.\n", stderr);
+        exit_code = 1;
+        goto cleanup;
+    }
+    if (db_initialize_schema(&db) != SQLITE_OK) {
+        fputs("Failed to init DB schema.\n", stderr);
+        exit_code = 1;
+        goto cleanup;
+    }
+    db_initialized = 1;
 
     if (quic_engine_init(&quic_engine, 8443, quic_default_handler, NULL) != 0) {
         fputs("Failed to initialize QUIC engine.\n", stderr);
@@ -52,7 +67,7 @@ int main(void) {
     }
     quic_started = 1;
 
-    websocket_context_init(&ws_context, &quic_engine);
+    websocket_context_init(&ws_context, &quic_engine, &db);
     ws_initialized = 1;
 
     if (server_init(&server, "0.0.0.0", 8080, 5) != 0) {
@@ -95,6 +110,9 @@ cleanup:
     }
     if (quic_initialized) {
         quic_engine_destroy(&quic_engine);
+    }
+    if (db_initialized) {
+        db_close(&db);
     }
 
     puts("OTT_QUIC server shutting down.");

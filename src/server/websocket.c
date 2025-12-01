@@ -1,6 +1,8 @@
 #include "server/websocket.h"
 
 #include "server/http.h"
+#include "auth/session.h"
+#include "db/database.h"
 
 #include <arpa/inet.h>
 #include <ctype.h>
@@ -50,6 +52,7 @@ static void ws_free_frame(ws_frame_t *frame);
 static int ws_send_frame(int fd, uint8_t opcode, const uint8_t *payload, size_t payload_len);
 static void sha1_compute(const uint8_t *data, size_t len, uint8_t out[20]);
 static int base64_encode(const uint8_t *data, size_t len, char *out, size_t out_size);
+static int base64_decode(const char *input, uint8_t *out, size_t out_size, size_t *out_len);
 static int read_exact(int fd, void *buf, size_t len);
 static int write_all(int fd, const void *buf, size_t len);
 static int header_contains_token(const char *value, const char *token);
@@ -62,13 +65,18 @@ static int hex_to_bytes(const char *hex, uint8_t *out, size_t max_len, size_t *o
 static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t *frame);
 static int send_json_response(int fd, const char *type, const char *status, const char *message);
 static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t *frame);
+static int handle_http_login(int fd, const http_request_t *req, websocket_context_t *ctx);
+static int handle_http_logout(int fd, const http_request_t *req, websocket_context_t *ctx);
+static int send_http_response(int fd, const char *status_line, const char *headers, const char *body);
+static int base64_decode(const char *input, uint8_t *out, size_t out_size, size_t *out_len);
 
-void websocket_context_init(websocket_context_t *ctx, quic_engine_t *engine) {
+void websocket_context_init(websocket_context_t *ctx, quic_engine_t *engine, db_context_t *db) {
     if (!ctx) {
         return;
     }
     memset(ctx, 0, sizeof(*ctx));
     ctx->quic_engine = engine;
+    ctx->db = db;
     pthread_mutex_init(&ctx->lock, NULL);
     ctx->next_packet_number = 1;
 }
@@ -102,9 +110,27 @@ int websocket_handle_client(int client_fd, websocket_context_t *ctx) {
     }
 
     if (validate_websocket_request(&request) != 0) {
+        if (ctx && ctx->db && strcmp(request.path, "/login") == 0) {
+            int rc = handle_http_login(client_fd, &request, ctx);
+            close(client_fd);
+            return rc;
+        }
+        if (ctx && ctx->db && strcmp(request.path, "/logout") == 0) {
+            int rc = handle_http_logout(client_fd, &request, ctx);
+            close(client_fd);
+            return rc;
+        }
         send_http_error(client_fd, "HTTP/1.1 400 Bad Request\r\n\r\n");
         close(client_fd);
         return -1;
+    }
+
+    /* optional: extend session if provided */
+    if (ctx && ctx->db) {
+        char sid[SESSION_ID_LEN + 1];
+        if (session_extract_from_headers(&request, sid, sizeof(sid)) == 0) {
+            session_validate_and_extend(ctx->db, sid, SESSION_TTL_SECONDS, NULL);
+        }
     }
 
     if (perform_handshake(client_fd, &request) != 0) {
@@ -185,6 +211,29 @@ static int send_http_error(int fd, const char *status_line) {
     return write_all(fd, status_line, strlen(status_line));
 }
 
+static int send_http_response(int fd, const char *status_line, const char *headers, const char *body) {
+    if (!status_line) {
+        return -1;
+    }
+    const char *body_safe = body ? body : "";
+    char buffer[1024];
+    int len = snprintf(buffer,
+                       sizeof(buffer),
+                       "%s"
+                       "Content-Length: %zu\r\n"
+                       "%s"
+                       "\r\n"
+                       "%s",
+                       status_line,
+                       strlen(body_safe),
+                       headers ? headers : "",
+                       body_safe);
+    if (len <= 0 || (size_t)len >= sizeof(buffer)) {
+        return -1;
+    }
+    return write_all(fd, buffer, (size_t)len);
+}
+
 static int header_contains_token(const char *value, const char *token) {
     if (!value || !token) {
         return 0;
@@ -234,6 +283,61 @@ static int validate_websocket_request(const http_request_t *req) {
     }
 
     return 0;
+}
+
+static int handle_http_login(int fd, const http_request_t *req, websocket_context_t *ctx) {
+    if (!ctx || !ctx->db) {
+        return send_http_response(fd, "HTTP/1.1 503 Service Unavailable\r\n", "Content-Type: text/plain\r\n", "service-unavailable");
+    }
+
+    const char *auth = http_get_header(req, "authorization");
+    if (!auth || strncasecmp(auth, "Basic ", 6) != 0) {
+        return send_http_response(fd,
+                                  "HTTP/1.1 401 Unauthorized\r\n",
+                                  "WWW-Authenticate: Basic\r\nContent-Type: text/plain\r\n",
+                                  "auth-required");
+    }
+
+    uint8_t decoded[256];
+    size_t decoded_len = 0;
+    if (base64_decode(auth + 6, decoded, sizeof(decoded) - 1, &decoded_len) != 0) {
+        return send_http_response(fd, "HTTP/1.1 400 Bad Request\r\n", "Content-Type: text/plain\r\n", "bad-basic");
+    }
+    decoded[decoded_len] = '\0';
+    char *colon = strchr((char *)decoded, ':');
+    if (!colon) {
+        return send_http_response(fd, "HTTP/1.1 400 Bad Request\r\n", "Content-Type: text/plain\r\n", "bad-basic");
+    }
+    *colon = '\0';
+    const char *user = (const char *)decoded;
+    const char *pass = colon + 1;
+
+    char sid[SESSION_ID_LEN + 1];
+    if (session_login(ctx->db, user, pass, sid, sizeof(sid)) != 0) {
+        return send_http_response(fd, "HTTP/1.1 401 Unauthorized\r\n", "Content-Type: text/plain\r\n", "login-failed");
+    }
+
+    char headers[256];
+    snprintf(headers,
+             sizeof(headers),
+             "Content-Type: application/json\r\n"
+             "Set-Cookie: SID=%s; HttpOnly; Secure\r\n",
+             sid);
+    char body[256];
+    snprintf(body, sizeof(body), "{\"session_id\":\"%s\"}", sid);
+    return send_http_response(fd, "HTTP/1.1 200 OK\r\n", headers, body);
+}
+
+static int handle_http_logout(int fd, const http_request_t *req, websocket_context_t *ctx) {
+    if (!ctx || !ctx->db) {
+        return send_http_response(fd, "HTTP/1.1 503 Service Unavailable\r\n", "Content-Type: text/plain\r\n", "service-unavailable");
+    }
+    char sid[SESSION_ID_LEN + 1];
+    if (session_extract_from_headers(req, sid, sizeof(sid)) != 0) {
+        return send_http_response(fd, "HTTP/1.1 400 Bad Request\r\n", "Content-Type: text/plain\r\n", "session-missing");
+    }
+    session_logout(ctx->db, sid);
+    return send_http_response(fd, "HTTP/1.1 200 OK\r\n", "Content-Type: text/plain\r\nSet-Cookie: SID=; Max-Age=0; HttpOnly; Secure\r\n", "logged-out");
 }
 
 static int perform_handshake(int fd, http_request_t *request) {
@@ -799,5 +903,46 @@ static int base64_encode(const uint8_t *data, size_t len, char *out, size_t out_
     }
     out[j] = '\0';
 
+    return 0;
+}
+
+static int base64_decode(const char *input, uint8_t *out, size_t out_size, size_t *out_len) {
+    if (!input || !out) {
+        return -1;
+    }
+    uint8_t table[256];
+    memset(table, 0x80, sizeof(table));
+    for (int i = 'A'; i <= 'Z'; ++i) table[i] = (uint8_t)(i - 'A');
+    for (int i = 'a'; i <= 'z'; ++i) table[i] = (uint8_t)(26 + i - 'a');
+    for (int i = '0'; i <= '9'; ++i) table[i] = (uint8_t)(52 + i - '0');
+    table[(unsigned char)'+'] = 62;
+    table[(unsigned char)'/'] = 63;
+
+    uint32_t buffer = 0;
+    int bits_collected = 0;
+    size_t out_idx = 0;
+
+    for (const char *p = input; *p; ++p) {
+        if (*p == '=') {
+            break;
+        }
+        uint8_t c = table[(unsigned char)*p];
+        if (c == 0x80) {
+            return -1;
+        }
+        buffer = (buffer << 6) | c;
+        bits_collected += 6;
+        if (bits_collected >= 8) {
+            bits_collected -= 8;
+            if (out_idx >= out_size) {
+                return -1;
+            }
+            out[out_idx++] = (uint8_t)((buffer >> bits_collected) & 0xFF);
+        }
+    }
+
+    if (out_len) {
+        *out_len = out_idx;
+    }
     return 0;
 }

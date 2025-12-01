@@ -2,6 +2,7 @@
 #define SERVER_WEBSOCKET_H
 
 #include "server/quic.h"
+#include "db/database.h"
 
 #include <pthread.h>
 #include <stddef.h>
@@ -13,11 +14,12 @@ extern "C" {
 
 typedef struct websocket_context {
     quic_engine_t *quic_engine;
+    db_context_t *db; /* optional */
     pthread_mutex_t lock;
     uint32_t next_packet_number;
 } websocket_context_t;
 
-void websocket_context_init(websocket_context_t *ctx, quic_engine_t *engine);
+void websocket_context_init(websocket_context_t *ctx, quic_engine_t *engine, db_context_t *db);
 void websocket_context_destroy(websocket_context_t *ctx);
 
 int websocket_handle_client(int client_fd, websocket_context_t *ctx);
