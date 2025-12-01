@@ -30,7 +30,9 @@ typedef struct {
 typedef enum {
     WS_CMD_UNKNOWN = 0,
     WS_CMD_PING,
-    WS_CMD_QUIC_SEND
+    WS_CMD_QUIC_SEND,
+    WS_CMD_LIST_VIDEOS,
+    WS_CMD_VIDEO_DETAIL
 } ws_command_type;
 
 typedef struct {
@@ -40,6 +42,7 @@ typedef struct {
     uint32_t offset;
     uint8_t payload[QUIC_MAX_PAYLOAD];
     size_t payload_len;
+    int video_id;
 } ws_command_t;
 
 static int read_http_request(int fd, char *buffer, size_t buf_size, size_t *out_len);
@@ -59,6 +62,7 @@ static const char *json_find_value(const char *json, const char *key);
 static int json_extract_string_field(const char *json, const char *key, char *out, size_t out_size);
 static int json_extract_uint64_field(const char *json, const char *key, uint64_t *out);
 static int json_extract_uint32_field(const char *json, const char *key, uint32_t *out);
+static int json_extract_int_field(const char *json, const char *key, int *out);
 static int parse_command(const char *text, ws_command_t *cmd);
 static int hex_to_bytes(const char *hex, uint8_t *out, size_t max_len, size_t *out_len);
 static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t *frame);
@@ -616,6 +620,23 @@ static int json_extract_uint32_field(const char *json, const char *key, uint32_t
     return 0;
 }
 
+static int json_extract_int_field(const char *json, const char *key, int *out) {
+    if (!json || !key || !out) {
+        return -1;
+    }
+    const char *value = json_find_value(json, key);
+    if (!value) {
+        return -1;
+    }
+    char *endptr = NULL;
+    long parsed = strtol(value, &endptr, 10);
+    if (value == endptr) {
+        return -1;
+    }
+    *out = (int)parsed;
+    return 0;
+}
+
 static int hex_to_bytes(const char *hex, uint8_t *out, size_t max_len, size_t *out_len) {
     if (!hex || !out) {
         return -1;
@@ -671,16 +692,29 @@ static int parse_command(const char *text, ws_command_t *cmd) {
         if (json_extract_uint32_field(text, "stream_id", &cmd->stream_id) != 0) {
             cmd->stream_id = 1;
         }
-        if (json_extract_uint32_field(text, "offset", &cmd->offset) != 0) {
-            cmd->offset = 0;
-        }
-        char payload_hex[QUIC_MAX_PAYLOAD * 2 + 1];
-        if (json_extract_string_field(text, "payload_hex", payload_hex, sizeof(payload_hex)) == 0) {
+    if (json_extract_uint32_field(text, "offset", &cmd->offset) != 0) {
+        cmd->offset = 0;
+    }
+    char payload_hex[QUIC_MAX_PAYLOAD * 2 + 1];
+    if (json_extract_string_field(text, "payload_hex", payload_hex, sizeof(payload_hex)) == 0) {
             if (hex_to_bytes(payload_hex, cmd->payload, sizeof(cmd->payload), &cmd->payload_len) != 0) {
                 return -1;
             }
         } else {
             cmd->payload_len = 0;
+        }
+        return 0;
+    }
+
+    if (strcmp(type, "list_videos") == 0) {
+        cmd->type = WS_CMD_LIST_VIDEOS;
+        return 0;
+    }
+
+    if (strcmp(type, "video_detail") == 0) {
+        cmd->type = WS_CMD_VIDEO_DETAIL;
+        if (json_extract_int_field(text, "video_id", &cmd->video_id) != 0) {
+            return -1;
         }
         return 0;
     }
@@ -757,6 +791,89 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
                  "sent-pn-%u",
                  packet.packet_number);
         return send_json_response(fd, "quic_send", "ok", detail);
+    }
+
+    if (cmd.type == WS_CMD_LIST_VIDEOS) {
+        if (!ctx || !ctx->db) {
+            return send_json_response(fd, "error", "unavailable", "db-missing");
+        }
+        sqlite3_stmt *stmt = NULL;
+        const char *sql = "SELECT id, title, IFNULL(thumbnail_path,''), IFNULL(duration,0) FROM videos ORDER BY id DESC LIMIT 20;";
+        if (sqlite3_prepare_v2(ctx->db->conn, sql, -1, &stmt, NULL) != SQLITE_OK) {
+            return send_json_response(fd, "error", "db_error", "list-failed");
+        }
+        char buf[4096];
+        size_t pos = 0;
+        pos += (size_t)snprintf(buf + pos, sizeof(buf) - pos, "{\"type\":\"videos\",\"items\":[");
+        int first = 1;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            if (!first) {
+                buf[pos++] = ',';
+            }
+            first = 0;
+            int id = sqlite3_column_int(stmt, 0);
+            const unsigned char *title = sqlite3_column_text(stmt, 1);
+            const unsigned char *thumb = sqlite3_column_text(stmt, 2);
+            int duration = sqlite3_column_int(stmt, 3);
+            pos += (size_t)snprintf(buf + pos,
+                                    sizeof(buf) - pos,
+                                    "{\"id\":%d,\"title\":\"%s\",\"thumbnail_path\":\"%s\",\"duration\":%d}",
+                                    id,
+                                    title ? (const char *)title : "",
+                                    thumb ? (const char *)thumb : "",
+                                    duration);
+            if (pos >= sizeof(buf) - 1) {
+                break;
+            }
+        }
+        sqlite3_finalize(stmt);
+        if (pos >= sizeof(buf) - 2) {
+            return send_json_response(fd, "error", "internal_error", "response-too-large");
+        }
+        pos += (size_t)snprintf(buf + pos, sizeof(buf) - pos, "]}");
+        return ws_send_frame(fd, 0x1, (const uint8_t *)buf, pos);
+    }
+
+    if (cmd.type == WS_CMD_VIDEO_DETAIL) {
+        if (!ctx || !ctx->db) {
+            return send_json_response(fd, "error", "unavailable", "db-missing");
+        }
+        const char *sql =
+            "SELECT id, title, IFNULL(description,''), file_path, IFNULL(thumbnail_path,''), "
+            "IFNULL(duration,0), IFNULL(upload_date,'') FROM videos WHERE id = ?;";
+        sqlite3_stmt *stmt = NULL;
+        if (sqlite3_prepare_v2(ctx->db->conn, sql, -1, &stmt, NULL) != SQLITE_OK) {
+            return send_json_response(fd, "error", "db_error", "detail-prepare-failed");
+        }
+        sqlite3_bind_int(stmt, 1, cmd.video_id);
+        int rc = sqlite3_step(stmt);
+        if (rc != SQLITE_ROW) {
+            sqlite3_finalize(stmt);
+            return send_json_response(fd, "error", "not_found", "video-not-found");
+        }
+        const unsigned char *title = sqlite3_column_text(stmt, 1);
+        const unsigned char *desc = sqlite3_column_text(stmt, 2);
+        const unsigned char *file = sqlite3_column_text(stmt, 3);
+        const unsigned char *thumb = sqlite3_column_text(stmt, 4);
+        int duration = sqlite3_column_int(stmt, 5);
+        const unsigned char *upload = sqlite3_column_text(stmt, 6);
+        char buf[1024];
+        int len = snprintf(buf,
+                           sizeof(buf),
+                           "{\"type\":\"video_detail\",\"id\":%d,\"title\":\"%s\",\"description\":\"%s\","
+                           "\"file_path\":\"%s\",\"thumbnail_path\":\"%s\",\"duration\":%d,\"upload_date\":\"%s\"}",
+                           cmd.video_id,
+                           title ? (const char *)title : "",
+                           desc ? (const char *)desc : "",
+                           file ? (const char *)file : "",
+                           thumb ? (const char *)thumb : "",
+                           duration,
+                           upload ? (const char *)upload : "");
+        sqlite3_finalize(stmt);
+        if (len <= 0 || len >= (int)sizeof(buf)) {
+            return send_json_response(fd, "error", "internal_error", "response-too-large");
+        }
+        return ws_send_frame(fd, 0x1, (const uint8_t *)buf, (size_t)len);
     }
 
     return send_json_response(fd, "error", "bad_request", "unsupported");
