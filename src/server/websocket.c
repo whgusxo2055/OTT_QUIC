@@ -57,7 +57,6 @@ typedef struct {
     int video_id;
     uint32_t chunk_length;
     uint32_t length;
-    int user_id;
     int position;
     uint32_t seek_offset;
     int segment_index;
@@ -83,9 +82,9 @@ static int json_extract_uint32_field(const char *json, const char *key, uint32_t
 static int json_extract_int_field(const char *json, const char *key, int *out);
 static int parse_command(const char *text, ws_command_t *cmd);
 static int hex_to_bytes(const char *hex, uint8_t *out, size_t max_len, size_t *out_len);
-static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t *frame);
+static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t *frame, int user_id);
 static int send_json_response(int fd, const char *type, const char *status, const char *message);
-static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t *frame);
+static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t *frame, int user_id);
 static int handle_http_login(int fd, const http_request_t *req, websocket_context_t *ctx);
 static int handle_http_logout(int fd, const http_request_t *req, websocket_context_t *ctx);
 static int send_http_response(int fd, const char *status_line, const char *headers, const char *body);
@@ -96,8 +95,6 @@ static int send_video_chunk(websocket_context_t *ctx,
                             uint32_t offset,
                             uint32_t length,
                             uint32_t *next_packet_number);
-static int send_ws_file(int fd, const char *path, const char magic[4], uint32_t index);
-
 static int send_ws_file(int fd, const char *path, const char magic[4], uint32_t index) {
     FILE *fp = fopen(path, "rb");
     if (!fp) {
@@ -276,6 +273,14 @@ int websocket_handle_client(int client_fd, websocket_context_t *ctx) {
         return -1;
     }
 
+    int current_user_id = 0;
+    if (ctx && ctx->db) {
+        char sid[SESSION_ID_LEN + 1];
+        if (session_extract_from_headers(&request, sid, sizeof(sid)) == 0) {
+            session_validate_and_extend(ctx->db, sid, SESSION_TTL_SECONDS, &current_user_id);
+        }
+    }
+
     if (send_json_response(client_fd, "ready", "ok", "websocket-ready") != 0) {
         close(client_fd);
         return -1;
@@ -288,7 +293,7 @@ int websocket_handle_client(int client_fd, websocket_context_t *ctx) {
         }
 
         if (frame.opcode == 0x1) {
-            if (handle_text_frame(client_fd, ctx, &frame) != 0 && frame.payload) {
+            if (handle_text_frame(client_fd, ctx, &frame, current_user_id) != 0 && frame.payload) {
                 ws_send_frame(client_fd, 0x1, frame.payload, (size_t)frame.payload_len);
             }
         } else if (frame.opcode == 0x2 || frame.opcode == 0x0) {
@@ -857,7 +862,7 @@ static int parse_command(const char *text, ws_command_t *cmd) {
     return -1;
 }
 
-static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t *frame) {
+static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t *frame, int user_id) {
     if (!frame->payload || frame->payload_len == 0) {
         return send_json_response(fd, "error", "bad_request", "empty-payload");
     }
@@ -1115,14 +1120,18 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
             return send_json_response(fd, "error", "unavailable", "db-missing");
         }
         db_watch_history_t hist;
-        if (db_get_watch_history(ctx->db, cmd.user_id, cmd.video_id, &hist) != SQLITE_OK) {
+        int uid = user_id > 0 ? user_id : 0;
+        if (uid == 0) {
+            return send_json_response(fd, "error", "unauthorized", "login-required");
+        }
+        if (db_get_watch_history(ctx->db, uid, cmd.video_id, &hist) != SQLITE_OK) {
             return send_json_response(fd, "watch_get", "not_found", "history-missing");
         }
         char resp[256];
         int len = snprintf(resp,
                            sizeof(resp),
                            "{\"type\":\"watch_get\",\"status\":\"ok\",\"user_id\":%d,\"video_id\":%d,\"position\":%d}",
-                           cmd.user_id,
+                           uid,
                            cmd.video_id,
                            hist.last_position);
         if (len <= 0 || len >= (int)sizeof(resp)) {
@@ -1135,13 +1144,18 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
         if (!ctx || !ctx->db) {
             return send_json_response(fd, "error", "unavailable", "db-missing");
         }
-        if (db_upsert_watch_history(ctx->db, cmd.user_id, cmd.video_id, cmd.position) != SQLITE_OK) {
+        int uid = user_id > 0 ? user_id : 0;
+        if (uid == 0) {
+            return send_json_response(fd, "error", "unauthorized", "login-required");
+        }
+        if (db_upsert_watch_history(ctx->db, uid, cmd.video_id, cmd.position) != SQLITE_OK) {
             return send_json_response(fd, "error", "db_error", "watch-update-failed");
         }
         char resp[128];
         int len = snprintf(resp,
                            sizeof(resp),
-                           "{\"type\":\"watch_update\",\"status\":\"ok\",\"position\":%d}",
+                           "{\"type\":\"watch_update\",\"status\":\"ok\",\"user_id\":%d,\"position\":%d}",
+                           uid,
                            cmd.position);
         if (len <= 0 || len >= (int)sizeof(resp)) {
             return send_json_response(fd, "error", "internal_error", "response-too-large");

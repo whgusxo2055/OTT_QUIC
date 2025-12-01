@@ -13,6 +13,7 @@ let segmentQueue = [];
 let appending = false;
 let nextSegment = 0;
 const maxSegments = 10;
+let watchTimer = null;
 
 function log(msg) {
   const el = document.getElementById('log');
@@ -129,13 +130,16 @@ function seekStream() {
 
 function stopStream() {
   send({type: 'stream_stop', connection_id: connectionId});
+  if (watchTimer) {
+    clearInterval(watchTimer);
+    watchTimer = null;
+  }
 }
 
 function watchGet() {
   if (!currentVideo) return;
   send({
     type: 'watch_get',
-    user_id: 1,
     video_id: currentVideo,
   });
 }
@@ -145,7 +149,6 @@ function watchSet() {
   const pos = parseInt(document.getElementById('watch-pos').value, 10) || 0;
   send({
     type: 'watch_update',
-    user_id: 1,
     video_id: currentVideo,
     position: pos,
   });
@@ -194,6 +197,8 @@ function handleMessage(msg) {
         streamId = msg.stream_id || streamId;
         durationMs = (msg.duration || 0) * 1000;
         updateMeta();
+        if (watchTimer) clearInterval(watchTimer);
+        watchTimer = setInterval(saveWatch, 10000);
       }
       log(JSON.stringify(msg));
       break;
@@ -302,4 +307,10 @@ function requestSegment() {
     video_id: currentVideo,
     segment: nextSegment,
   });
+}
+
+function saveWatch() {
+  const pos = parseInt(document.getElementById('seek-offset').value, 10) || 0;
+  if (!currentVideo) return;
+  send({type: 'watch_update', video_id: currentVideo, position: pos});
 }
