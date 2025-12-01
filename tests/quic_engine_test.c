@@ -215,6 +215,51 @@ int main(void) {
     assert(state.packet.packet_number == data_packet2.packet_number);
     assert(state.stream_len == sizeof(payload));
 
+    /* 서버->클라이언트 데이터 전송 및 재전송 검증 */
+    quic_metrics_t before_metrics;
+    quic_engine_get_metrics(&engine, &before_metrics);
+
+    quic_packet_t server_data = {
+        .flags = QUIC_FLAG_DATA,
+        .connection_id = conn_id2,
+        .packet_number = 100,
+        .stream_id = 1,
+        .offset = 0,
+        .length = sizeof(payload),
+        .payload = payload,
+    };
+    assert(quic_engine_send_to_connection(&engine, &server_data) == 0);
+
+    sleep(2);
+    quic_packet_t server_data_rx;
+    memset(&server_data_rx, 0, sizeof(server_data_rx));
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        recv_len = recvfrom(client_fd2, recv_buf, sizeof(recv_buf), 0, NULL, NULL);
+        assert(recv_len > 0);
+        assert(quic_packet_deserialize(&server_data_rx, recv_buf, (size_t)recv_len) == 0);
+        if (server_data_rx.flags & QUIC_FLAG_DATA) {
+            break;
+        }
+    }
+    assert(server_data_rx.flags & QUIC_FLAG_DATA);
+    assert(server_data_rx.packet_number == server_data.packet_number);
+
+    quic_packet_t server_ack = {
+        .flags = QUIC_FLAG_ACK,
+        .connection_id = conn_id2,
+        .packet_number = server_data_rx.packet_number,
+        .stream_id = server_data.stream_id,
+        .offset = server_data.offset,
+        .length = 0,
+        .payload = NULL,
+    };
+    assert(quic_packet_serialize(&server_ack, buffer, sizeof(buffer), &len) == 0);
+    assert(sendto(client_fd2, buffer, len, 0, (struct sockaddr *)&addr, sizeof(addr)) == (ssize_t)len);
+
+    quic_metrics_t after_metrics;
+    quic_engine_get_metrics(&engine, &after_metrics);
+    assert(after_metrics.packets_sent - before_metrics.packets_sent >= 2);
+
     /* 타임아웃 정리 검증 */
     pthread_mutex_lock(&engine.lock);
     quic_connection_entry_t *entry = NULL;

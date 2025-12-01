@@ -18,6 +18,9 @@ extern "C" {
 #define QUIC_MAX_PACKET_SIZE    (QUIC_HEADER_SIZE + QUIC_MAX_PAYLOAD)
 #define QUIC_MAX_CONNECTIONS    32
 #define QUIC_CONNECTION_TIMEOUT 30
+#define QUIC_MAX_PENDING        64
+#define QUIC_RETRANS_TIMEOUT    1
+#define QUIC_MAX_RETRIES        3
 
 #define QUIC_FLAG_INITIAL   0x01
 #define QUIC_FLAG_HANDSHAKE 0x02
@@ -71,6 +74,16 @@ typedef struct {
     quic_stream_manager_t stream_mgr;
 } quic_connection_entry_t;
 
+typedef struct {
+    int in_use;
+    uint64_t connection_id;
+    uint32_t packet_number;
+    size_t len;
+    uint8_t buffer[QUIC_MAX_PACKET_SIZE];
+    time_t last_sent;
+    int retries;
+} quic_pending_entry_t;
+
 typedef struct quic_engine {
     int sockfd;
     uint16_t port;
@@ -86,6 +99,7 @@ typedef struct quic_engine {
     uint32_t recv_timeout_sec;
     quic_metrics_t metrics;
     quic_connection_entry_t connections[QUIC_MAX_CONNECTIONS];
+    quic_pending_entry_t pending[QUIC_MAX_PENDING];
 } quic_engine_t;
 
 int quic_packet_serialize(const quic_packet_t *packet, uint8_t *buffer, size_t buffer_len, size_t *out_len);
