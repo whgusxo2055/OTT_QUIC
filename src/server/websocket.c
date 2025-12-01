@@ -38,7 +38,9 @@ typedef enum {
     WS_CMD_LIST_VIDEOS,
     WS_CMD_VIDEO_DETAIL,
     WS_CMD_STREAM_START,
-    WS_CMD_STREAM_CHUNK
+    WS_CMD_STREAM_CHUNK,
+    WS_CMD_WATCH_GET,
+    WS_CMD_WATCH_UPDATE
 } ws_command_type;
 
 typedef struct {
@@ -51,6 +53,8 @@ typedef struct {
     int video_id;
     uint32_t chunk_length;
     uint32_t length;
+    int user_id;
+    int position;
 } ws_command_t;
 
 static int read_http_request(int fd, char *buffer, size_t buf_size, size_t *out_len);
@@ -1035,6 +1039,45 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
                            "{\"type\":\"stream_chunk\",\"status\":\"ok\",\"offset\":%u,\"length\":%u}",
                            cmd.offset,
                            cmd.length);
+        if (len <= 0 || len >= (int)sizeof(resp)) {
+            return send_json_response(fd, "error", "internal_error", "response-too-large");
+        }
+        return ws_send_frame(fd, 0x1, (const uint8_t *)resp, (size_t)len);
+    }
+
+    if (cmd.type == WS_CMD_WATCH_GET) {
+        if (!ctx || !ctx->db) {
+            return send_json_response(fd, "error", "unavailable", "db-missing");
+        }
+        db_watch_history_t hist;
+        if (db_get_watch_history(ctx->db, cmd.user_id, cmd.video_id, &hist) != SQLITE_OK) {
+            return send_json_response(fd, "watch_get", "not_found", "history-missing");
+        }
+        char resp[256];
+        int len = snprintf(resp,
+                           sizeof(resp),
+                           "{\"type\":\"watch_get\",\"status\":\"ok\",\"user_id\":%d,\"video_id\":%d,\"position\":%d}",
+                           cmd.user_id,
+                           cmd.video_id,
+                           hist.last_position);
+        if (len <= 0 || len >= (int)sizeof(resp)) {
+            return send_json_response(fd, "error", "internal_error", "response-too-large");
+        }
+        return ws_send_frame(fd, 0x1, (const uint8_t *)resp, (size_t)len);
+    }
+
+    if (cmd.type == WS_CMD_WATCH_UPDATE) {
+        if (!ctx || !ctx->db) {
+            return send_json_response(fd, "error", "unavailable", "db-missing");
+        }
+        if (db_upsert_watch_history(ctx->db, cmd.user_id, cmd.video_id, cmd.position) != SQLITE_OK) {
+            return send_json_response(fd, "error", "db_error", "watch-update-failed");
+        }
+        char resp[128];
+        int len = snprintf(resp,
+                           sizeof(resp),
+                           "{\"type\":\"watch_update\",\"status\":\"ok\",\"position\":%d}",
+                           cmd.position);
         if (len <= 0 || len >= (int)sizeof(resp)) {
             return send_json_response(fd, "error", "internal_error", "response-too-large");
         }
