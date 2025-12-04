@@ -42,6 +42,24 @@ let pendingInitSegment = null;
 let reconnectAttempts = 0; // 재연결 시도 횟수
 let videoCodecString = null; // 서버에서 받은 코덱 정보 (null = 아직 모름)
 let mediaSourceReady = false; // MediaSource가 열렸는지 여부
+let pendingTimestampOffset = null; // SourceBuffer timestamp offset 적용 대기
+let desiredStartTime = 0; // 이어보기 등 요청된 시작 위치(초)
+let timelineOffset = 0; // 현재 스트림 타임라인의 오프셋(PTS 보정)
+let pendingMessages = []; // 소켓 미연결 시 보낼 메시지 큐
+
+function recoverStream(reason) {
+  const video = document.getElementById('player');
+  const current = video ? video.currentTime : 0;
+  console.warn('[MSE] Recovering stream due to:', reason, 'at time:', current.toFixed(2));
+  resetMediaSource();
+  setupMediaSource();
+  desiredStartTime = current;
+  seekTargetTime = current;
+  nextSegment = findSegmentForTime(current);
+  pendingInitSegment = null;
+  requesting = false;
+  send({ type: 'ws_init', video_id: videoId });
+}
 
 // 코덱 이름을 MIME 코덱 문자열로 변환
 function getCodecMimeString(videoCodec) {
@@ -57,6 +75,11 @@ function getCodecMimeString(videoCodec) {
   return codecMap[videoCodec?.toLowerCase()] || 'avc1.64001f';
 }
 
+function setTimestampOffset(offsetSec) {
+  timelineOffset = 0;
+  pendingTimestampOffset = null;
+}
+
 // SourceBuffer 생성 함수
 function createSourceBuffer() {
   if (!mediaSource || mediaSource.readyState !== 'open') {
@@ -68,40 +91,37 @@ function createSourceBuffer() {
     return true;
   }
   
-  // 코덱 문자열 결정 (서버에서 받은 것 또는 기본값)
-  const codecStr = videoCodecString || 'avc1.64001f';
-  const mimeType = `video/mp4; codecs="${codecStr}, mp4a.40.2"`;
-  console.log('[MSE] Creating SourceBuffer with codec:', mimeType);
-  
+  // 코덱 문자열 결정 (서버에서 받은 것 또는 기본값) - 대소문자 보존
+  const codecStrRaw = videoCodecString || 'avc1.64001f';
+  const codecLower = codecStrRaw.toLowerCase();
+  const candidates = [];
+  if (codecLower.startsWith('hvc1') || codecLower.startsWith('hev1')) {
+    candidates.push(`video/mp4; codecs="${codecStrRaw}, mp4a.40.2"`);
+    // hvc1/hev1 교차 시도 (앞부분만 교체, 나머지 표기는 그대로 유지)
+    const swappedPrefix = codecLower.startsWith('hvc1') ? 'hev1' : 'hvc1';
+    const swapped = codecStrRaw.replace(/^(hvc1|hev1)/i, swappedPrefix);
+    if (swapped !== codecStrRaw) {
+      candidates.push(`video/mp4; codecs="${swapped}, mp4a.40.2"`);
+    }
+  } else {
+    candidates.push(`video/mp4; codecs="${codecStrRaw}, mp4a.40.2"`);
+  }
+  const mimeType = candidates.find((c) => MediaSource.isTypeSupported(c));
+  console.log('[MSE] Codec candidates:', candidates, 'selected:', mimeType || candidates[0]);
+
   try {
-    if (!MediaSource.isTypeSupported(mimeType)) {
-      console.error('[MSE] Codec not supported:', mimeType);
-      // 대안 코덱들 시도
-      const fallbackCodecs = [
-        'video/mp4; codecs="hvc1.1.6.L120.90, mp4a.40.2"', // HEVC
-        'video/mp4; codecs="avc1.64001f, mp4a.40.2"',     // H.264 High
-        'video/mp4; codecs="avc1.42E01E, mp4a.40.2"',     // H.264 Baseline
-        'video/mp4; codecs="av01.0.08M.08, mp4a.40.2"'    // AV1
-      ];
-      
-      for (const altMime of fallbackCodecs) {
-        if (MediaSource.isTypeSupported(altMime)) {
-          console.log('[MSE] Using fallback codec:', altMime);
-          sourceBuffer = mediaSource.addSourceBuffer(altMime);
-          setupSourceBufferEvents();
-          bufferValid = true;
-          return true;
-        }
-      }
-      
-      console.error('[MSE] No supported codec found');
-      alert('지원되는 비디오 코덱이 없습니다.');
+    if (!mimeType) {
+      console.error('[MSE] No supported codec found among candidates:', candidates);
+      alert('지원되는 비디오 코덱이 없습니다. (HEVC 미지원 브라우저일 수 있음)');
       return false;
     }
     
     sourceBuffer = mediaSource.addSourceBuffer(mimeType);
     setupSourceBufferEvents();
     bufferValid = true;
+    if (pendingTimestampOffset !== null) {
+      setTimestampOffset(pendingTimestampOffset);
+    }
     console.log('[MSE] SourceBuffer created successfully');
     return true;
   } catch (e) {
@@ -200,16 +220,20 @@ function findSegmentForTime(time) {
 
 document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('back-btn').addEventListener('click', goBack);
+  const adminLink = document.getElementById('admin-link');
+  if (adminLink && localStorage.getItem('ott_is_admin') === 'true') {
+    adminLink.style.display = 'inline-block';
+  }
   connectWebSocket();
 });
 
 function goBack() {
-  saveProgress();
+  saveProgress(true);
   window.location.href = 'index.html';
 }
 
 window.addEventListener('beforeunload', () => {
-  saveProgress();
+  saveProgress(true);
 });
 
 function connectWebSocket() {
@@ -223,6 +247,12 @@ function connectWebSocket() {
     // Get last position first
     console.log('[WS] Sending watch_get for video:', videoId);
     send({type: 'watch_get', video_id: videoId});
+    if (pendingMessages.length > 0) {
+      console.log('[WS] Flushing pending messages:', pendingMessages.length);
+      const queue = pendingMessages.slice();
+      pendingMessages = [];
+      queue.forEach(msg => send(msg));
+    }
   };
 
   socket.onmessage = (ev) => {
@@ -302,12 +332,17 @@ function connectWebSocket() {
 function send(obj) {
   // 모든 요청에 세션 ID 포함
   obj.session_id = sessionId;
-  console.log('[WS] Sending:', obj);
   if (socket && socket.readyState === WebSocket.OPEN) {
+    console.log('[WS] Sending:', obj);
     socket.send(JSON.stringify(obj));
-  } else {
-    console.warn('[WS] Socket not ready, state:', socket?.readyState);
+    return true;
   }
+  console.warn('[WS] Socket not ready, state:', socket?.readyState);
+  pendingMessages.push(obj);
+  if (!socket || socket.readyState === WebSocket.CLOSED) {
+    connectWebSocket();
+  }
+  return false;
 }
 
 function handleMessage(msg) {
@@ -342,26 +377,12 @@ function handleMessage(msg) {
         console.log('[WS] Init segment sent by server, duration:', msg.total_duration || msg.duration, 'segments:', msg.total_segments);
         
         // 코덱 정보 저장 (video_codec 필드에서 MIME 코덱 문자열 생성)
-        if (msg.video_codec) {
+        if (msg.codec_string) {
+          videoCodecString = msg.codec_string;
+          console.log('[WS] Video codec string (server):', videoCodecString);
+        } else if (msg.video_codec) {
           videoCodecString = getCodecMimeString(msg.video_codec);
           console.log('[WS] Video codec:', msg.video_codec, '-> MIME:', videoCodecString);
-        }
-        
-        // MediaSource가 준비되었으면 SourceBuffer 생성
-        if (mediaSourceReady && !sourceBuffer) {
-          if (createSourceBuffer()) {
-            // 저장된 INIT 세그먼트가 있으면 추가
-            if (pendingInitSegment) {
-              console.log('[MSE] Appending pending INIT segment after codec info received');
-              appendSegment(pendingInitSegment);
-              pendingInitSegment = null;
-              setTimeout(() => {
-                if (isSourceBufferValid()) {
-                  requestSegment();
-                }
-              }, 100);
-            }
-          }
         }
         
         // Set total segments from server
@@ -378,6 +399,13 @@ function handleMessage(msg) {
           if (segmentInfo.length > 0 && segmentInfo[0].duration) {
             segmentDuration = segmentInfo[0].duration;
           }
+          // 정확한 목표 세그먼트 재계산 (이어보기 시)
+          if (desiredStartTime > 0) {
+            nextSegment = findSegmentForTime(desiredStartTime);
+          }
+          if (seekTargetTime <= 0 && desiredStartTime > 0) {
+            seekTargetTime = desiredStartTime;
+          }
         } else {
           // fallback: 세그먼트 길이 계산 (duration / total_segments)
           const duration = msg.total_duration || msg.duration;
@@ -388,7 +416,8 @@ function handleMessage(msg) {
         }
         
         // Set duration on mediaSource when ready
-        const durationSec = msg.total_duration || msg.duration;
+        const durationSecRaw = msg.total_duration || msg.duration;
+        const durationSec = durationSecRaw ? Math.max(0, durationSecRaw - timelineOffset) : 0;
         if (durationSec && durationSec > 0) {
           const waitForBuffer = () => {
             if (mediaSource && mediaSource.readyState === 'open' && sourceBuffer && !sourceBuffer.updating) {
@@ -408,6 +437,23 @@ function handleMessage(msg) {
         // Start saving progress periodically
         if (watchTimer) clearInterval(watchTimer);
         watchTimer = setInterval(saveProgress, CONFIG.PROGRESS_SAVE_INTERVAL);
+
+        // MediaSource가 준비되었으면 SourceBuffer 생성(타임라인 오프셋 계산 후)
+        if (mediaSourceReady && !sourceBuffer) {
+          if (createSourceBuffer()) {
+            // 저장된 INIT 세그먼트가 있으면 추가
+            if (pendingInitSegment) {
+              console.log('[MSE] Appending pending INIT segment after codec info received');
+              appendSegment(pendingInitSegment);
+              pendingInitSegment = null;
+              setTimeout(() => {
+                if (isSourceBufferValid()) {
+                  requestSegment();
+                }
+              }, 100);
+            }
+          }
+        }
       } else {
         console.error('[WS] Init failed:', msg.message);
       }
@@ -445,6 +491,8 @@ function handleMessage(msg) {
 function startStream(position) {
   resetMediaSource();
   setupMediaSource();
+  timelineOffset = 0;
+  desiredStartTime = position || 0;
   
   // position이 0보다 크면 해당 위치부터 시작
   if (position > 0) {
@@ -468,6 +516,10 @@ function setupMediaSource() {
   mediaSource = new MediaSource();
   objectUrl = URL.createObjectURL(mediaSource);
   video.src = objectUrl;
+  video.addEventListener('ended', () => {
+    userPaused = true;
+    saveProgress(true, true);
+  });
 
   // Video element error handler
   video.onerror = (e) => {
@@ -550,13 +602,20 @@ function setupMediaSource() {
     console.log('[Video] Stalled - network issue');
   };
 
-  video.onplaying = () => {
+  video.onplaying = (e) => {
     console.log('[Video] Playing');
-    userPaused = false; // 재생 시작하면 플래그 해제
+    if (e && e.isTrusted) {
+      userPaused = false; // 사용자가 재생을 눌렀을 때만 해제
+    }
   };
 
-  video.onpause = () => {
+  video.onpause = (e) => {
     console.log('[Video] Paused');
+    if (e && e.isTrusted) {
+      userPaused = true;
+      console.log('[Video] User paused (trusted event)');
+      return;
+    }
     // seeking 중이 아니고 버퍼가 충분하면 사용자가 일시정지한 것으로 간주
     // (버퍼 부족으로 인한 자동 pause 구분)
     if (!seeking && sourceBuffer && sourceBuffer.buffered.length > 0) {
@@ -656,6 +715,8 @@ function setupMediaSource() {
         return;
       } catch (e) {
         console.warn('[MSE] Buffer clear failed:', e);
+        recoverStream('buffer clear failed');
+        return;
       }
     }
     
@@ -827,6 +888,11 @@ function appendSegment(buffer) {
     console.warn('[MSE] Queue too large, dropping oldest segment');
     segmentQueue.shift();
   }
+
+  if (!buffer || buffer.length === 0) {
+    console.warn('[MSE] Dropping empty segment payload');
+    return;
+  }
   
   segmentQueue.push(buffer);
   appendNext();
@@ -881,6 +947,10 @@ function appendNext() {
   if (!sourceBuffer || !bufferValid || !mediaSource || mediaSource.readyState !== 'open' || sourceBuffer.updating || appending || segmentQueue.length === 0) {
     return;
   }
+  if (mediaSource && mediaSource.readyState === 'ended') {
+    recoverStream('mediaSource ended before append');
+    return;
+  }
 
   // 버퍼 정리는 주기적으로 별도로 수행 (재귀 호출 방지)
   appending = true;
@@ -909,6 +979,8 @@ function appendNext() {
         // 다음 세그먼트 시도
         setTimeout(appendNext, 500);
       }
+    } else if (e.name === 'InvalidStateError') {
+      recoverStream('invalid state on append');
     }
   }
 }
@@ -994,23 +1066,27 @@ function requestSegment() {
   
   requesting = true; // 요청 시작 플래그 설정
   console.log('[WS] Requesting segment:', nextSegment);
-  send({
+  const sent = send({
     type: 'ws_segment',
     video_id: videoId,
     segment: nextSegment
   });
+  if (!sent) {
+    requesting = false;
+  }
 }
 
-function saveProgress() {
+function saveProgress(force = false, ended = false) {
   const video = document.getElementById('player');
-  if (video && !video.paused) {
-    const pos = Math.floor(video.currentTime); // 초 단위로 저장
-    send({
-      type: 'watch_update',
-      video_id: videoId,
-      position: pos
-    });
-  }
+  if (!video) return;
+  const pos = ended ? Math.floor(video.duration || video.currentTime) : Math.floor(video.currentTime);
+  if (pos <= 0) return;
+  if (!force && video.paused) return;
+  send({
+    type: 'watch_update',
+    video_id: videoId,
+    position: pos
+  });
 }
 
 function resetMediaSource() {
@@ -1023,6 +1099,7 @@ function resetMediaSource() {
   seeking = false;
   seekTargetTime = 0;
   retryCount = 0;
+  pendingMessages = [];
   
   // interval 정리
   if (cleanupInterval) {

@@ -5,9 +5,56 @@ let continueCache = [];
 let currentSortOrder = 'latest';
 let pendingVideo = null;  // 이어보기 모달에서 선택된 비디오
 
+// 썸네일은 nginx(8080)에서 우선 제공, 실패 시 동일 호스트(8443)로 폴백
+const thumbBase = `http://${window.location.hostname}:8080/`;
+const fallbackThumbBase = `${window.location.origin}/`;
+const THUMB_PLACEHOLDER = 'https://via.placeholder.com/320x180?text=No+Image';
+
+function buildThumbUrl(path, base) {
+  if (!path) return '';
+  if (path.startsWith('http://') || path.startsWith('https://')) return path;
+  const clean = path.startsWith('/') ? path.slice(1) : path;
+  return base + clean;
+}
+
+function resolveThumb(path, placeholder = THUMB_PLACEHOLDER) {
+  const url = buildThumbUrl(path, thumbBase);
+  return url || placeholder;
+}
+
+function setThumbSrc(img, path, placeholder = THUMB_PLACEHOLDER) {
+  const primary = resolveThumb(path, placeholder);
+  const fallback = buildThumbUrl(path, fallbackThumbBase) || placeholder;
+  img.onerror = () => {
+    if (img.dataset.thumbFallbackUsed === '1') {
+      img.onerror = null;
+      img.src = placeholder;
+      return;
+    }
+    img.dataset.thumbFallbackUsed = '1';
+    img.src = fallback;
+  };
+  img.src = primary;
+}
+
+function setBackgroundThumb(el, path) {
+  if (!el || !path) return;
+  const primary = buildThumbUrl(path, thumbBase);
+  const fallback = buildThumbUrl(path, fallbackThumbBase);
+  const loader = new Image();
+  loader.onload = () => { el.style.backgroundImage = `url('${primary}')`; };
+  loader.onerror = () => {
+    if (fallback && fallback !== primary) {
+      el.style.backgroundImage = `url('${fallback}')`;
+    }
+  };
+  loader.src = primary;
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   connectWebSocket();
   document.getElementById('logout-btn').addEventListener('click', logout);
+  updateUserDisplay();
   
   if (localStorage.getItem('ott_is_admin') === 'true') {
     document.getElementById('admin-link').style.display = 'inline-block';
@@ -22,6 +69,14 @@ document.addEventListener('DOMContentLoaded', () => {
   // 모달 초기화
   initModals();
 });
+
+function updateUserDisplay() {
+  const name = localStorage.getItem('ott_nickname') || '';
+  const el = document.getElementById('user-display');
+  if (el) {
+    el.textContent = name ? `${name} 님` : '';
+  }
+}
 
 // ===== 검색 기능 =====
 function initSearch() {
@@ -122,7 +177,7 @@ function renderSearchResults(results) {
     };
     
     const img = document.createElement('img');
-    img.src = video.thumbnail_path || 'https://via.placeholder.com/100x56?text=No+Image';
+    setThumbSrc(img, video.thumbnail_path, 'https://via.placeholder.com/100x56?text=No+Image');
     img.alt = video.title;
     
     const info = document.createElement('div');
@@ -262,7 +317,7 @@ function showResumeModal(video) {
   const position = document.getElementById('modal-position');
   const progress = document.getElementById('modal-progress');
   
-  thumb.src = video.thumbnail_path || 'https://via.placeholder.com/320x180?text=No+Image';
+  setThumbSrc(thumb, video.thumbnail_path);
   title.textContent = video.title;
   
   const positionSec = video.position || 0;
@@ -284,7 +339,7 @@ function showDetailModal(video) {
   const desc = document.getElementById('detail-desc');
   const duration = document.getElementById('detail-duration');
   
-  backdrop.style.backgroundImage = `url('${video.thumbnail_path || ''}')`;
+  setBackgroundThumb(backdrop, video.thumbnail_path);
   title.textContent = video.title;
   desc.textContent = video.description || '설명이 없습니다.';
   duration.textContent = `재생시간: ${formatDuration(video.duration)}`;
@@ -337,13 +392,25 @@ function handleMessage(msg) {
 function renderMainLists() {
   if (videoCache.length === 0) return;
 
-  const heroVideo = videoCache[0];
+  const heroVideo = getHeroVideo();
   updateHero(heroVideo);
 
   // 정렬 적용
   const sortedVideos = sortVideos(videoCache);
   renderCarousel('video-list', sortedVideos, false);
   renderCarousel('new-list', videoCache.slice().reverse().slice(0, 5), false);
+}
+
+function getHeroVideo() {
+  if (continueCache.length > 0) {
+    const cont = continueCache[0];
+    const match = videoCache.find(v => v.id === cont.id || v.id === cont.video_id);
+    if (match) {
+      return { ...match, position: cont.position || match.position };
+    }
+    return cont;
+  }
+  return videoCache[0];
 }
 
 function renderContinueList() {
@@ -362,9 +429,7 @@ function updateHero(video) {
   document.getElementById('hero-desc').textContent = video.description || 'No description available.';
   
   const heroSection = document.getElementById('hero-section');
-  if (video.thumbnail_path) {
-    heroSection.style.backgroundImage = `url('${video.thumbnail_path}')`;
-  }
+  setBackgroundThumb(heroSection, video.thumbnail_path);
   
   document.getElementById('hero-play-btn').onclick = () => {
     window.location.href = `watch.html?id=${video.id}`;
@@ -388,6 +453,17 @@ function renderCarousel(elementId, videos, showProgress = false) {
   videos.forEach(video => {
     const card = document.createElement('div');
     card.className = 'video-card';
+    
+    // 상세 아이콘
+    const detailBtn = document.createElement('button');
+    detailBtn.className = 'video-info-btn';
+    detailBtn.innerHTML = 'i';
+    detailBtn.title = '상세 정보';
+    detailBtn.onclick = (e) => {
+      e.stopPropagation();
+      showDetailModal(video);
+    };
+    card.appendChild(detailBtn);
     
     // 시청 기록 확인 (continueCache에서 해당 비디오 찾기)
     const watchHistory = continueCache.find(c => c.id === video.id || c.video_id === video.id);
@@ -416,7 +492,7 @@ function renderCarousel(elementId, videos, showProgress = false) {
     }
     
     const img = document.createElement('img');
-    img.src = video.thumbnail_path || 'https://via.placeholder.com/320x180?text=No+Image';
+    setThumbSrc(img, video.thumbnail_path);
     img.alt = video.title;
     
     const info = document.createElement('div');

@@ -90,9 +90,18 @@ int main(void) {
     pthread_cond_init(&state.cond, NULL);
 
     quic_engine_t engine;
-    const uint16_t port = 18443;
-    if (quic_engine_init(&engine, port, packet_handler, &state) != 0) {
-        fprintf(stderr, "quic_engine_init bind failed, skipping test\n");
+    const uint16_t candidate_ports[] = {20443, 21443, 22443, 23443, 24443};
+    uint16_t port = candidate_ports[0];
+    int init_ok = 0;
+    for (size_t i = 0; i < sizeof(candidate_ports) / sizeof(candidate_ports[0]); ++i) {
+        port = candidate_ports[i];
+        if (quic_engine_init(&engine, port, packet_handler, &state) == 0) {
+            init_ok = 1;
+            break;
+        }
+    }
+    if (!init_ok) {
+        fprintf(stderr, "quic_engine_init bind failed on candidate ports, skipping test\n");
         return 0;
     }
     quic_engine_set_stream_data_handler(&engine, stream_handler, &state);

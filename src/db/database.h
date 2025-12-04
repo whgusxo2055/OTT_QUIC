@@ -67,6 +67,7 @@ int db_create_user(db_context_t *ctx,
                    const char *role,
                    int *out_user_id);
 int db_get_user_by_username(db_context_t *ctx, const char *username, db_user_t *out_user);
+int db_get_user_by_id(db_context_t *ctx, int user_id, db_user_t *out_user);
 int db_delete_user_by_id(db_context_t *ctx, int user_id);
 
 int db_create_video(db_context_t *ctx,
@@ -80,6 +81,7 @@ int db_create_video(db_context_t *ctx,
 int db_get_video_by_id(db_context_t *ctx, int video_id, db_video_t *out_video);
 int db_delete_video_by_id(db_context_t *ctx, int video_id);
 int db_update_video_segment_path(db_context_t *ctx, int video_id, const char *segment_path);
+int db_update_video_metadata(db_context_t *ctx, int video_id, const char *title, const char *description);
 
 int db_upsert_watch_history(db_context_t *ctx, int user_id, int video_id, int last_position);
 int db_get_watch_history(db_context_t *ctx, int user_id, int video_id, db_watch_history_t *out_history);

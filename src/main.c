@@ -82,10 +82,11 @@ int main(void) {
     const char *tls_key = getenv("TLS_KEY_PATH");
     if (tls_cert && tls_key) {
         if (server_enable_tls(&server, tls_cert, tls_key) != 0) {
-            fputs("Warning: failed to enable TLS with provided cert/key. Continuing without TLS.\n", stderr);
-        } else {
-            puts("TLS enabled for HTTPS/WSS.");
+            fputs("Error: failed to enable TLS with provided cert/key. Exiting to avoid plain HTTP on TLS port.\n", stderr);
+            exit_code = 1;
+            goto cleanup;
         }
+        puts("TLS enabled for HTTPS/WSS.");
     } else {
         puts("TLS_CERT_PATH/TLS_KEY_PATH not set; running without TLS (dev only).");
     }

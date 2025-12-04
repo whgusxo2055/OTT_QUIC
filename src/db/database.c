@@ -216,6 +216,41 @@ int db_get_user_by_username(db_context_t *ctx, const char *username, db_user_t *
     return rc;
 }
 
+int db_get_user_by_id(db_context_t *ctx, int user_id, db_user_t *out_user) {
+    if (!ctx || !ctx->conn || !out_user) {
+        return SQLITE_MISUSE;
+    }
+
+    const char *sql =
+        "SELECT id, username, nickname, password_hash, role, IFNULL(created_at, '')"
+        " FROM users WHERE id = ?;";
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(ctx->conn, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        return rc;
+    }
+
+    sqlite3_bind_int(stmt, 1, user_id);
+
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+        memset(out_user, 0, sizeof(*out_user));
+        out_user->id = sqlite3_column_int(stmt, 0);
+        copy_column_text(stmt, 1, out_user->username, sizeof(out_user->username));
+        copy_column_text(stmt, 2, out_user->nickname, sizeof(out_user->nickname));
+        copy_column_text(stmt, 3, out_user->password_hash, sizeof(out_user->password_hash));
+        copy_column_text(stmt, 4, out_user->role, sizeof(out_user->role));
+        copy_column_text(stmt, 5, out_user->created_at, sizeof(out_user->created_at));
+        rc = SQLITE_OK;
+    } else if (rc == SQLITE_DONE) {
+        rc = SQLITE_NOTFOUND;
+    }
+
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
 int db_delete_user_by_id(db_context_t *ctx, int user_id) {
     if (!ctx || !ctx->conn) {
         return SQLITE_MISUSE;
@@ -363,6 +398,27 @@ int db_update_video_segment_path(db_context_t *ctx, int video_id, const char *se
         rc = SQLITE_OK;
     }
 
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+int db_update_video_metadata(db_context_t *ctx, int video_id, const char *title, const char *description) {
+    if (!ctx || !ctx->conn) {
+        return SQLITE_MISUSE;
+    }
+    const char *sql = "UPDATE videos SET title = ?, description = ? WHERE id = ?;";
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(ctx->conn, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        return rc;
+    }
+    sqlite3_bind_text(stmt, 1, title ? title : "", -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, description ? description : "", -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 3, video_id);
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_DONE) {
+        rc = SQLITE_OK;
+    }
     sqlite3_finalize(stmt);
     return rc;
 }

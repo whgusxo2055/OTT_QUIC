@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
   <meta charset="UTF-8">
-  <title>OTT_QUIC - 로그인</title>
+  <title>OTT_QUIC - 회원가입</title>
   <link rel="stylesheet" href="css/style.css">
   <style>
     body {
@@ -69,18 +69,26 @@
     .login-signup a:hover {
       text-decoration: underline;
     }
+    .error-msg {
+      color: #ff6b6b;
+      font-size: 14px;
+      min-height: 18px;
+      margin-top: 8px;
+    }
   </style>
 </head>
 <body>
   <div class="login-container">
-    <h1 class="login-title">로그인</h1>
+    <h1 class="login-title">회원가입</h1>
     <div class="login-form">
-      <input type="text" id="username" placeholder="이메일 주소 또는 전화번호">
+      <input type="text" id="nickname" placeholder="이름(닉네임)">
+      <input type="text" id="username" placeholder="아이디">
       <input type="password" id="password" placeholder="비밀번호">
-      <button id="login-btn" onclick="handleLogin()">로그인</button>
+      <button id="signup-btn" onclick="handleSignup()">가입하기</button>
+      <div class="error-msg" id="error-msg"></div>
     </div>
     <div class="login-signup">
-      회원이 아니신가요?  <a href="signup.html">지금 가입하세요.</a>
+      이미 계정이 있으신가요? <a href="login.html">로그인</a>
     </div>
   </div>
 
@@ -90,43 +98,46 @@
     const useHttps = location.protocol === 'https:';
     const apiBase = `${useHttps ? 'https' : 'http'}://${apiHost}:${apiPort}`;
 
-    async function handleLogin() {
-      const user = document.getElementById('username').value;
-      const pass = document.getElementById('password').value;
-      
+    async function handleSignup() {
+      const nickname = document.getElementById('nickname').value.trim();
+      const username = document.getElementById('username').value.trim();
+      const password = document.getElementById('password').value;
+      const errorEl = document.getElementById('error-msg');
+      errorEl.textContent = '';
+
+      if (!nickname || !username || !password) {
+        errorEl.textContent = '모든 필드를 입력해주세요.';
+        return;
+      }
+
       try {
-        const res = await fetch(apiBase + '/login', {
+        const res = await fetch(apiBase + '/signup', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           credentials: 'include',
-          body: JSON.stringify({username: user, password: pass}),
+          body: JSON.stringify({nickname, username, password}),
         });
-        
         if (res.ok) {
           const data = await res.json();
-          // 세션 ID 저장 (localStorage 사용)
           localStorage.setItem('ott_session_id', data.session_id);
-          localStorage.setItem('ott_username', user);
-          localStorage.setItem('ott_nickname', data.nickname || user);
-          if (data.is_admin) {
-            localStorage.setItem('ott_is_admin', 'true');
-          } else {
-            localStorage.removeItem('ott_is_admin');
-          }
+          localStorage.setItem('ott_username', data.username);
+          localStorage.setItem('ott_nickname', data.nickname || data.username);
+          localStorage.removeItem('ott_is_admin');
           window.location.href = 'index.html';
+        } else if (res.status === 409) {
+          errorEl.textContent = '이미 존재하는 아이디입니다.';
         } else {
-          alert('로그인 실패: 아이디 또는 비밀번호를 확인하세요.');
+          errorEl.textContent = '가입에 실패했습니다. 다시 시도해주세요.';
         }
       } catch (e) {
         console.error(e);
-        alert('서버 연결 오류');
+        errorEl.textContent = '서버 연결 오류';
       }
     }
 
-    // 엔터키 로그인 지원
     document.getElementById('password').addEventListener('keypress', function (e) {
       if (e.key === 'Enter') {
-        handleLogin();
+        handleSignup();
       }
     });
   </script>

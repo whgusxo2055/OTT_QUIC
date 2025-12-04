@@ -116,10 +116,18 @@ static void websocket_client_ping(uint16_t port) {
 
 int main(void) {
     server_ctx_t server;
-    const uint16_t port = 18080;
-
-    if (server_init(&server, "127.0.0.1", port, 5) != 0) {
-        fprintf(stderr, "server_init bind failed, skipping test\n");
+    const uint16_t candidate_ports[] = {20080, 21080, 22080, 23080, 24080};
+    int init_ok = 0;
+    uint16_t port = candidate_ports[0];
+    for (size_t i = 0; i < sizeof(candidate_ports) / sizeof(candidate_ports[0]); ++i) {
+        port = candidate_ports[i];
+        if (server_init(&server, "127.0.0.1", port, 5) == 0) {
+            init_ok = 1;
+            break;
+        }
+    }
+    if (!init_ok) {
+        fprintf(stderr, "server_init bind failed on candidate ports, skipping test\n");
         return 0;
     }
     assert(server_start(&server) == 0);

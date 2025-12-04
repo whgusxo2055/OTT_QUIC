@@ -101,6 +101,13 @@ int server_enable_tls(server_ctx_t *ctx, const char *cert_path, const char *key_
         ERR_print_errors_fp(stderr);
         return -1;
     }
+    /* Allow TLS1.2+ so older clients can connect while keeping TLS1/1.1 disabled. */
+    if (SSL_CTX_set_min_proto_version(ctx->ssl_ctx, TLS1_2_VERSION) != 1) {
+        ERR_print_errors_fp(stderr);
+        SSL_CTX_free(ctx->ssl_ctx);
+        ctx->ssl_ctx = NULL;
+        return -1;
+    }
     if (SSL_CTX_use_certificate_file(ctx->ssl_ctx, cert_path, SSL_FILETYPE_PEM) != 1) {
         ERR_print_errors_fp(stderr);
         SSL_CTX_free(ctx->ssl_ctx);

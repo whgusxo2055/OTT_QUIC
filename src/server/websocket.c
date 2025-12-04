@@ -960,7 +960,8 @@ static int handle_text_frame(ws_io_t *io, websocket_context_t *ctx, const ws_fra
             return send_json_response(io, "error", "unavailable", "db-missing");
         }
         sqlite3_stmt *stmt = NULL;
-        const char *sql = "SELECT id, title, IFNULL(thumbnail_path,''), IFNULL(duration,0) FROM videos ORDER BY id DESC LIMIT 20;";
+        const char *sql = "SELECT id, title, IFNULL(description,''), IFNULL(thumbnail_path,''), IFNULL(duration,0) "
+                          "FROM videos ORDER BY id DESC LIMIT 20;";
         if (sqlite3_prepare_v2(ctx->db->conn, sql, -1, &stmt, NULL) != SQLITE_OK) {
             return send_json_response(io, "error", "db_error", "list-failed");
         }
@@ -975,13 +976,15 @@ static int handle_text_frame(ws_io_t *io, websocket_context_t *ctx, const ws_fra
             first = 0;
             int id = sqlite3_column_int(stmt, 0);
             const unsigned char *title = sqlite3_column_text(stmt, 1);
-            const unsigned char *thumb = sqlite3_column_text(stmt, 2);
-            int duration = sqlite3_column_int(stmt, 3);
+            const unsigned char *desc = sqlite3_column_text(stmt, 2);
+            const unsigned char *thumb = sqlite3_column_text(stmt, 3);
+            int duration = sqlite3_column_int(stmt, 4);
             pos += (size_t)snprintf(buf + pos,
                                     sizeof(buf) - pos,
-                                    "{\"id\":%d,\"title\":\"%s\",\"thumbnail_path\":\"%s\",\"duration\":%d}",
+                                    "{\"id\":%d,\"title\":\"%s\",\"description\":\"%s\",\"thumbnail_path\":\"%s\",\"duration\":%d}",
                                     id,
                                     title ? (const char *)title : "",
+                                    desc ? (const char *)desc : "",
                                     thumb ? (const char *)thumb : "",
                                     duration);
             if (pos >= sizeof(buf) - 1) {
@@ -1004,7 +1007,7 @@ static int handle_text_frame(ws_io_t *io, websocket_context_t *ctx, const ws_fra
             return send_json_response(io, "error", "unauthorized", "login-required");
         }
         sqlite3_stmt *stmt = NULL;
-        const char *sql = "SELECT v.id, v.title, IFNULL(v.thumbnail_path,''), IFNULL(v.duration,0), w.last_position "
+        const char *sql = "SELECT v.id, v.title, IFNULL(v.description,''), IFNULL(v.thumbnail_path,''), IFNULL(v.duration,0), w.last_position "
                           "FROM watch_history w JOIN videos v ON w.video_id = v.id "
                           "WHERE w.user_id = ? AND w.last_position > 10 ORDER BY w.updated_at DESC LIMIT 10;";
         if (sqlite3_prepare_v2(ctx->db->conn, sql, -1, &stmt, NULL) != SQLITE_OK) {
@@ -1023,14 +1026,16 @@ static int handle_text_frame(ws_io_t *io, websocket_context_t *ctx, const ws_fra
             first = 0;
             int id = sqlite3_column_int(stmt, 0);
             const unsigned char *title = sqlite3_column_text(stmt, 1);
-            const unsigned char *thumb = sqlite3_column_text(stmt, 2);
-            int duration = sqlite3_column_int(stmt, 3);
-            int position = sqlite3_column_int(stmt, 4);
+            const unsigned char *desc = sqlite3_column_text(stmt, 2);
+            const unsigned char *thumb = sqlite3_column_text(stmt, 3);
+            int duration = sqlite3_column_int(stmt, 4);
+            int position = sqlite3_column_int(stmt, 5);
             pos += (size_t)snprintf(buf + pos,
                                     sizeof(buf) - pos,
-                                    "{\"id\":%d,\"title\":\"%s\",\"thumbnail_path\":\"%s\",\"duration\":%d,\"position\":%d}",
+                                    "{\"id\":%d,\"title\":\"%s\",\"description\":\"%s\",\"thumbnail_path\":\"%s\",\"duration\":%d,\"position\":%d}",
                                     id,
                                     title ? (const char *)title : "",
+                                    desc ? (const char *)desc : "",
                                     thumb ? (const char *)thumb : "",
                                     duration,
                                     position);

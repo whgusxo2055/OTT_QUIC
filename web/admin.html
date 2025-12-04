@@ -14,24 +14,54 @@
   </nav>
 
   <div class="admin-container">
-    <h1>영상 업로드</h1>
-    <div class="form-group">
-      <label>영상 파일</label>
-      <input type="file" id="upload-file" accept="video/*">
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="tab-upload">업로드</button>
+      <button class="tab-btn" data-tab="tab-manage">영상 관리</button>
     </div>
-    <div class="form-group">
-      <label>제목</label>
-      <input type="text" id="upload-title" placeholder="영상 제목">
+
+    <div id="tab-upload" class="tab-panel active">
+      <h1>영상 업로드</h1>
+      <div class="form-group">
+        <label>영상 파일</label>
+        <input type="file" id="upload-file" accept="video/*">
+      </div>
+      <div class="form-group">
+        <label>제목</label>
+        <input type="text" id="upload-title" placeholder="영상 제목">
+      </div>
+      <div class="form-group">
+        <label>설명</label>
+        <textarea id="upload-desc" rows="4" placeholder="영상 설명"></textarea>
+      </div>
+      <button id="upload-btn" class="btn btn-red" style="width: 100%;">업로드 시작</button>
+      
+      <div class="upload-status" style="margin-top: 20px;">
+        <div class="upload-progress-bar"><div class="progress-fill" id="upload-progress"></div></div>
+        <div id="upload-msg" style="color: #ccc; margin-top: 10px;"></div>
+      </div>
     </div>
-    <div class="form-group">
-      <label>설명</label>
-      <textarea id="upload-desc" rows="4" placeholder="영상 설명"></textarea>
+
+    <div id="tab-manage" class="tab-panel">
+      <h1>영상 관리</h1>
+      <div id="video-list" class="admin-list"></div>
     </div>
-    <button id="upload-btn" class="btn btn-red" style="width: 100%;">업로드 시작</button>
-    
-    <div class="upload-status" style="margin-top: 20px;">
-      <div class="upload-progress-bar"><div class="progress-fill" id="upload-progress"></div></div>
-      <div id="upload-msg" style="color: #ccc; margin-top: 10px;"></div>
+  </div>
+
+  <div id="edit-modal" class="modal" style="display:none;">
+    <div class="modal-content" style="max-width:500px;">
+      <h3>메타데이터 수정</h3>
+      <div class="form-group">
+        <label>제목</label>
+        <input type="text" id="edit-title">
+      </div>
+      <div class="form-group">
+        <label>설명</label>
+        <textarea id="edit-desc" rows="4"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button id="edit-save" class="btn btn-primary">저장</button>
+        <button id="edit-cancel" class="btn btn-secondary">닫기</button>
+      </div>
     </div>
   </div>
 

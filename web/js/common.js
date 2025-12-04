@@ -16,6 +16,7 @@ function checkLogin() {
 function logout() {
   localStorage.removeItem('ott_session_id');
   localStorage.removeItem('ott_username');
+  localStorage.removeItem('ott_nickname');
   localStorage.removeItem('ott_is_admin');
   window.location.href = 'login.html';
 }

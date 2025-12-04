@@ -106,8 +106,19 @@ static int parse_multipart(const char *body,
     return (*out_file && *out_file_len > 0) ? 0 : -1;
 }
 
-int handle_upload_request(int fd, const char *headers, const char *body, size_t body_len, db_context_t *db) {
-    if (!headers || !body || body_len == 0 || !db) {
+static int write_resp(int fd, SSL *ssl, const char *resp) {
+    size_t len = strlen(resp);
+#ifdef ENABLE_TLS
+    if (ssl) {
+        return SSL_write(ssl, resp, (int)len);
+    }
+#endif
+    (void)ssl;
+    return (int)write(fd, resp, len);
+}
+
+int handle_upload_request(int fd, SSL *ssl, const char *content_type, const char *body, size_t body_len, db_context_t *db) {
+    if (!content_type || !body || body_len == 0 || !db) {
         return -1;
     }
 
@@ -117,19 +128,19 @@ int handle_upload_request(int fd, const char *headers, const char *body, size_t 
                            "Access-Control-Allow-Origin: *\r\n"
                            "Access-Control-Allow-Credentials: true\r\n\r\n"
                            "{\"status\":\"error\",\"message\":\"payload-too-large\"}";
-        write(fd, resp, strlen(resp));
+        write_resp(fd, ssl, resp);
         return -1;
     }
 
     int video_id = 0;
     int video_created = 0;
-    const char *ct = strstr(headers, "Content-Type: multipart/form-data; boundary=");
+    const char *ct = strstr(content_type, "multipart/form-data; boundary=");
     if (!ct) {
         const char *resp = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n"
                            "Access-Control-Allow-Origin: *\r\n"
                            "Access-Control-Allow-Credentials: true\r\n\r\n"
                            "{\"status\":\"error\",\"message\":\"multipart-required\"}";
-        write(fd, resp, strlen(resp));
+        write_resp(fd, ssl, resp);
         return -1;
     }
     ct = strchr(ct, '=');
@@ -138,7 +149,7 @@ int handle_upload_request(int fd, const char *headers, const char *body, size_t 
                            "Access-Control-Allow-Origin: *\r\n"
                            "Access-Control-Allow-Credentials: true\r\n\r\n"
                            "{\"status\":\"error\",\"message\":\"missing-boundary\"}";
-        write(fd, resp, strlen(resp));
+        write_resp(fd, ssl, resp);
         return -1;
     }
     ct++;
@@ -154,7 +165,7 @@ int handle_upload_request(int fd, const char *headers, const char *body, size_t 
                            "Access-Control-Allow-Origin: *\r\n"
                            "Access-Control-Allow-Credentials: true\r\n\r\n"
                            "{\"status\":\"error\",\"message\":\"invalid-boundary\"}";
-        write(fd, resp, strlen(resp));
+        write_resp(fd, ssl, resp);
         return -1;
     }
 
@@ -167,7 +178,7 @@ int handle_upload_request(int fd, const char *headers, const char *body, size_t 
                            "Access-Control-Allow-Origin: *\r\n"
                            "Access-Control-Allow-Credentials: true\r\n\r\n"
                            "{\"status\":\"error\",\"message\":\"invalid-multipart\"}";
-        write(fd, resp, strlen(resp));
+        write_resp(fd, ssl, resp);
         return -1;
     }
     title[sizeof(title) - 1] = '\0';
@@ -229,13 +240,13 @@ int handle_upload_request(int fd, const char *headers, const char *body, size_t 
     db_update_video_segment_path(db, video_id, segment_dir);
 
     char resp[256];
-    int len = snprintf(resp,
-                       sizeof(resp),
-                       "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-                       "Access-Control-Allow-Origin: *\r\n"
-                       "Access-Control-Allow-Credentials: true\r\n\r\n"
-                       "{\"status\":\"ok\",\"video_id\":%d}",
-                       video_id);
-    write(fd, resp, (size_t)len);
+    snprintf(resp,
+             sizeof(resp),
+             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+             "Access-Control-Allow-Origin: *\r\n"
+             "Access-Control-Allow-Credentials: true\r\n\r\n"
+             "{\"status\":\"ok\",\"video_id\":%d}",
+             video_id);
+    write_resp(fd, ssl, resp);
     return 0;
 }
