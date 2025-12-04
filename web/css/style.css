@@ -80,6 +80,96 @@ body {
   font-size: 1.2rem;
 }
 
+/* Search */
+.search-container {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.search-input {
+  width: 0;
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.75);
+  border: 1px solid #fff;
+  color: #fff;
+  border-radius: 4px;
+  font-size: 14px;
+  opacity: 0;
+  transition: width 0.3s ease, opacity 0.3s ease;
+}
+
+.search-input::placeholder {
+  color: #999;
+}
+
+.search-container.active .search-input {
+  width: 250px;
+  opacity: 1;
+}
+
+.search-results {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  width: 400px;
+  max-height: 400px;
+  overflow-y: auto;
+  background: rgba(20, 20, 20, 0.95);
+  border-radius: 4px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  z-index: 1000;
+  display: none;
+}
+
+.search-container.active .search-results.show {
+  display: block;
+}
+
+.search-result-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.search-result-item:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.search-result-item img {
+  width: 100px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 4px;
+}
+
+.search-result-info {
+  flex: 1;
+}
+
+.search-result-title {
+  font-size: 14px;
+  font-weight: bold;
+  margin-bottom: 4px;
+}
+
+.search-result-desc {
+  font-size: 12px;
+  color: #999;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-no-results {
+  padding: 20px;
+  text-align: center;
+  color: #999;
+}
+
 /* Hero Section */
 .hero {
   position: relative;
@@ -320,3 +410,309 @@ video {
   height: 100vh;
   object-fit: contain;
 }
+
+/* Modal Base */
+.modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+}
+
+.modal-content {
+  background: #1a1a1a;
+  padding: 30px;
+  border-radius: 8px;
+  max-width: 400px;
+  width: 90%;
+  text-align: center;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+}
+
+.modal-content h3 {
+  font-size: 1.3rem;
+  margin-bottom: 15px;
+  color: #fff;
+}
+
+.modal-content p {
+  color: #aaa;
+  margin-bottom: 25px;
+  font-size: 0.95rem;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 15px;
+  justify-content: center;
+}
+
+.modal-actions .btn {
+  flex: 1;
+  padding: 12px 20px;
+  font-size: 1rem;
+}
+
+/* Video Progress Bar */
+.video-progress-container {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.video-progress-bar {
+  height: 100%;
+  background: var(--primary);
+  transition: width 0.3s;
+}
+
+/* Sort Dropdown */
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.section-header h2 {
+  margin-bottom: 0;
+}
+
+.sort-select {
+  padding: 8px 12px;
+  background: #333;
+  color: #fff;
+  border: 1px solid #555;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  outline: none;
+}
+
+.sort-select:hover {
+  border-color: #777;
+}
+
+.sort-select:focus {
+  border-color: var(--primary);
+}
+
+/* Video Detail Modal */
+#video-detail-modal .modal-content {
+  max-width: 600px;
+  padding: 0;
+  overflow: hidden;
+}
+
+.video-detail-header {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16/9;
+  background: #000;
+}
+
+.video-detail-header img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.video-detail-close {
+  position: absolute;
+  top: 15px;
+  right: 15px;
+  width: 35px;
+  height: 35px;
+  background: rgba(0, 0, 0, 0.6);
+  border: none;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 1.2rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.video-detail-close:hover {
+  background: rgba(0, 0, 0, 0.8);
+}
+
+.video-detail-body {
+  padding: 25px;
+  text-align: left;
+}
+
+.video-detail-title {
+  font-size: 1.5rem;
+  font-weight: bold;
+  margin-bottom: 10px;
+  color: #fff;
+}
+
+.video-detail-meta {
+  color: #888;
+  font-size: 0.9rem;
+  margin-bottom: 15px;
+  display: flex;
+  gap: 15px;
+}
+
+.video-detail-desc {
+  color: #ccc;
+  line-height: 1.6;
+  font-size: 0.95rem;
+  margin-bottom: 20px;
+}
+
+.video-detail-actions {
+  display: flex;
+  gap: 15px;
+}
+
+.video-detail-actions .btn {
+  flex: 1;
+}
+
+/* Resume Modal Specific */
+#resume-modal .modal-content {
+  max-width: 450px;
+  padding: 0;
+  overflow: hidden;
+  background: #1a1a1a;
+}
+
+.modal-thumbnail {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16/9;
+  background: #000;
+}
+
+.modal-thumbnail img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.modal-progress-bar {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.modal-progress-fill {
+  height: 100%;
+  background: var(--primary);
+}
+
+.modal-info {
+  padding: 20px;
+  text-align: left;
+}
+
+.modal-info h3 {
+  font-size: 1.2rem;
+  margin-bottom: 8px;
+  color: #fff;
+}
+
+.modal-info p {
+  color: #888;
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+#resume-modal .modal-actions {
+  padding: 0 20px 20px;
+  display: flex;
+  gap: 15px;
+}
+
+.modal-close {
+  position: absolute;
+  top: 15px;
+  right: 15px;
+  width: 35px;
+  height: 35px;
+  background: rgba(0, 0, 0, 0.6);
+  border: none;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 1.1rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+
+.modal-close:hover {
+  background: rgba(0, 0, 0, 0.9);
+}
+
+#resume-modal .modal-content {
+  position: relative;
+}
+
+/* Detail Modal Specific */
+#detail-modal .modal-content {
+  max-width: 550px;
+  padding: 0;
+  overflow: hidden;
+  background: #1a1a1a;
+  position: relative;
+}
+
+.detail-backdrop {
+  width: 100%;
+  aspect-ratio: 16/9;
+  background-size: cover;
+  background-position: center;
+}
+
+.detail-info {
+  padding: 25px;
+  text-align: left;
+}
+
+.detail-info h2 {
+  font-size: 1.4rem;
+  margin-bottom: 12px;
+  color: #fff;
+}
+
+.detail-info p {
+  color: #aaa;
+  line-height: 1.6;
+  margin-bottom: 15px;
+  font-size: 0.95rem;
+}
+
+.detail-meta {
+  color: #888;
+  font-size: 0.85rem;
+  margin-bottom: 20px;
+}
+
+.detail-actions {
+  display: flex;
+  gap: 15px;
+}
+
+.detail-actions .btn {
+  flex: 1;
+}
+

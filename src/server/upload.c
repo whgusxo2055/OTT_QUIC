@@ -125,14 +125,18 @@ int handle_upload_request(int fd, const char *headers, const char *body, size_t 
     int video_created = 0;
     const char *ct = strstr(headers, "Content-Type: multipart/form-data; boundary=");
     if (!ct) {
-        const char *resp = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\r\n"
+        const char *resp = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n"
+                           "Access-Control-Allow-Origin: *\r\n"
+                           "Access-Control-Allow-Credentials: true\r\n\r\n"
                            "{\"status\":\"error\",\"message\":\"multipart-required\"}";
         write(fd, resp, strlen(resp));
         return -1;
     }
     ct = strchr(ct, '=');
     if (!ct) {
-        const char *resp = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\r\n"
+        const char *resp = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n"
+                           "Access-Control-Allow-Origin: *\r\n"
+                           "Access-Control-Allow-Credentials: true\r\n\r\n"
                            "{\"status\":\"error\",\"message\":\"missing-boundary\"}";
         write(fd, resp, strlen(resp));
         return -1;
@@ -146,7 +150,9 @@ int handle_upload_request(int fd, const char *headers, const char *body, size_t 
         boundary[--bl] = '\0';
     }
     if (bl < 4 || bl >= sizeof(boundary) - 1) {
-        const char *resp = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\r\n"
+        const char *resp = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n"
+                           "Access-Control-Allow-Origin: *\r\n"
+                           "Access-Control-Allow-Credentials: true\r\n\r\n"
                            "{\"status\":\"error\",\"message\":\"invalid-boundary\"}";
         write(fd, resp, strlen(resp));
         return -1;
@@ -189,7 +195,7 @@ int handle_upload_request(int fd, const char *headers, const char *body, size_t 
 
     char thumb_path[256];
     snprintf(thumb_path, sizeof(thumb_path), "data/thumbs/%s.jpg", base_name);
-    video_extract_thumbnail(video_path, thumb_path, "00:00:05", 320, 180);
+    video_extract_thumbnail(video_path, thumb_path, "00:00:05");
 
     if (db_create_video(db,
                         title[0] ? title : base_name,

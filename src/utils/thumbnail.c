@@ -4,18 +4,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-int video_extract_thumbnail(const char *input_path, const char *output_path, const char *timestamp, int width, int height) {
+int video_extract_thumbnail(const char *input_path, const char *output_path, const char *timestamp) {
     if (!input_path || !output_path || !timestamp) {
         return -1;
     }
     char cmd[512];
     snprintf(cmd,
              sizeof(cmd),
-             "ffmpeg -y -loglevel error -i \"%s\" -ss %s -vframes 1 -vf \"scale=%d:%d\" \"%s\"",
+             "ffmpeg -y -loglevel error -i \"%s\" -ss %s -vframes 1 -q:v 2 \"%s\"",
              input_path,
              timestamp,
-             width,
-             height,
              output_path);
     int rc = system(cmd);
     return rc == 0 ? 0 : -1;

@@ -10,16 +10,11 @@
   <!-- Navigation -->
   <nav class="nav" id="navbar">
     <a href="index.html" class="brand">OTT_QUIC</a>
-    <div class="nav-menu">
-      <a href="index.html" class="active">홈</a>
-      <a href="#">시리즈</a>
-      <a href="#">영화</a>
-      <a href="#">NEW! 요즘 대세 콘텐츠</a>
-      <a href="#">내가 찜한 콘텐츠</a>
-    </div>
     <div class="nav-right">
-      <button class="icon-btn"><i class="fas fa-search"></i></button>
-      <button class="icon-btn"><i class="fas fa-bell"></i></button>
+      <div class="search-container" id="search-container">
+        <input type="text" id="search-input" class="search-input" placeholder="제목, 설명 검색...">
+        <button class="icon-btn" id="search-btn"><i class="fas fa-search"></i></button>
+      </div>
       <div class="profile-menu" style="display: flex; gap: 10px; align-items: center;">
         <a id="admin-link" href="admin.html" class="btn btn-secondary" style="padding: 5px 10px; font-size: 0.8rem; display: none;">관리자</a>
         <button id="logout-btn" class="btn btn-secondary" style="padding: 5px 10px; font-size: 0.8rem;">로그아웃</button>
@@ -49,7 +44,16 @@
     </section>
 
     <section class="section">
-      <h2>지금 뜨는 콘텐츠</h2>
+      <div class="section-header">
+        <h2>지금 뜨는 콘텐츠</h2>
+        <div class="sort-options">
+          <select id="sort-select" class="sort-select">
+            <option value="latest">최신순</option>
+            <option value="title">제목순</option>
+            <option value="duration">재생시간순</option>
+          </select>
+        </div>
+      </div>
       <div class="carousel" id="video-list"></div>
     </section>
 
@@ -57,6 +61,45 @@
       <h2>새로 올라온 콘텐츠</h2>
       <div class="carousel" id="new-list"></div>
     </section>
+  </div>
+
+  <!-- 이어보기 모달 -->
+  <div id="resume-modal" class="modal" style="display: none;">
+    <div class="modal-content">
+      <div class="modal-thumbnail">
+        <img id="modal-thumb" src="" alt="">
+        <div class="modal-progress-bar">
+          <div class="modal-progress-fill" id="modal-progress"></div>
+        </div>
+      </div>
+      <div class="modal-info">
+        <h3 id="modal-title"></h3>
+        <p id="modal-position"></p>
+      </div>
+      <div class="modal-actions">
+        <button id="modal-resume" class="btn btn-primary"><i class="fas fa-play"></i> 이어보기</button>
+        <button id="modal-restart" class="btn btn-secondary"><i class="fas fa-redo"></i> 처음부터</button>
+      </div>
+      <button id="modal-close" class="modal-close"><i class="fas fa-times"></i></button>
+    </div>
+  </div>
+
+  <!-- 영상 상세 모달 -->
+  <div id="detail-modal" class="modal" style="display: none;">
+    <div class="modal-content detail-modal-content">
+      <div class="detail-backdrop" id="detail-backdrop"></div>
+      <button id="detail-close" class="modal-close"><i class="fas fa-times"></i></button>
+      <div class="detail-info">
+        <h2 id="detail-title"></h2>
+        <p id="detail-desc"></p>
+        <div class="detail-meta">
+          <span id="detail-duration"></span>
+        </div>
+        <div class="detail-actions">
+          <button id="detail-play" class="btn btn-primary"><i class="fas fa-play"></i> 재생</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script src="js/common.js"></script>

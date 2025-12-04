@@ -401,12 +401,18 @@ static int send_http_error(int fd, const char *status_line) {
 }
 
 static int handle_http_upload(int fd, const http_request_t *req, const char *body, size_t body_len, websocket_context_t *ctx) {
-    (void)req;
+    char cors[256];
+    build_cors_header(req, cors, sizeof(cors));
+    
     if (!ctx || !ctx->db) {
-        return send_http_response(fd, "HTTP/1.1 503 Service Unavailable\r\n", "Content-Type: text/plain\r\n", "service-unavailable");
+        char headers[512];
+        snprintf(headers, sizeof(headers), "Content-Type: text/plain\r\n%s", cors);
+        return send_http_response(fd, "HTTP/1.1 503 Service Unavailable\r\n", headers, "service-unavailable");
     }
     if (!body || body_len == 0) {
-        return send_http_response(fd, "HTTP/1.1 400 Bad Request\r\n", "Content-Type: text/plain\r\n", "empty-body");
+        char headers[512];
+        snprintf(headers, sizeof(headers), "Content-Type: text/plain\r\n%s", cors);
+        return send_http_response(fd, "HTTP/1.1 400 Bad Request\r\n", headers, "empty-body");
     }
     const char *ct = http_get_header(req, "content-type");
     char headers[512];
@@ -416,7 +422,9 @@ static int handle_http_upload(int fd, const http_request_t *req, const char *bod
         headers[0] = '\0';
     }
     if (handle_upload_request(fd, headers, body, body_len, ctx->db) != 0) {
-        return send_http_response(fd, "HTTP/1.1 500 Internal Server Error\r\n", "Content-Type: text/plain\r\n", "upload-failed");
+        char err_headers[512];
+        snprintf(err_headers, sizeof(err_headers), "Content-Type: text/plain\r\n%s", cors);
+        return send_http_response(fd, "HTTP/1.1 500 Internal Server Error\r\n", err_headers, "upload-failed");
     }
     return 0;
 }
@@ -1178,9 +1186,9 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
             return send_json_response(fd, "error", "unauthorized", "login-required");
         }
         sqlite3_stmt *stmt = NULL;
-        const char *sql = "SELECT v.id, v.title, IFNULL(v.thumbnail_path,''), IFNULL(v.duration,0) "
+        const char *sql = "SELECT v.id, v.title, IFNULL(v.thumbnail_path,''), IFNULL(v.duration,0), w.last_position "
                           "FROM watch_history w JOIN videos v ON w.video_id = v.id "
-                          "WHERE w.user_id = ? ORDER BY w.updated_at DESC LIMIT 10;";
+                          "WHERE w.user_id = ? AND w.last_position > 10 ORDER BY w.updated_at DESC LIMIT 10;";
         if (sqlite3_prepare_v2(ctx->db->conn, sql, -1, &stmt, NULL) != SQLITE_OK) {
             return send_json_response(fd, "error", "db_error", "list-continue-failed");
         }
@@ -1199,13 +1207,15 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
             const unsigned char *title = sqlite3_column_text(stmt, 1);
             const unsigned char *thumb = sqlite3_column_text(stmt, 2);
             int duration = sqlite3_column_int(stmt, 3);
+            int position = sqlite3_column_int(stmt, 4);
             pos += (size_t)snprintf(buf + pos,
                                     sizeof(buf) - pos,
-                                    "{\"id\":%d,\"title\":\"%s\",\"thumbnail_path\":\"%s\",\"duration\":%d}",
+                                    "{\"id\":%d,\"title\":\"%s\",\"thumbnail_path\":\"%s\",\"duration\":%d,\"position\":%d}",
                                     id,
                                     title ? (const char *)title : "",
                                     thumb ? (const char *)thumb : "",
-                                    duration);
+                                    duration,
+                                    position);
             if (pos >= sizeof(buf) - 1) {
                 break;
             }
@@ -1360,49 +1370,39 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
             fseek(fp, 0, SEEK_SET);
             
             if (file_size > 0 && file_size < 1024 * 1024) { // Max 1MB
-                // Allocate buffer for: header + file content
-                size_t header_max = 64;
-                char *buffer = malloc(header_max + file_size + 1);
-                if (buffer) {
-                    // Read file content after header space
-                    size_t read_len = fread(buffer + header_max, 1, file_size, fp);
+                char *file_content = malloc(file_size + 1);
+                if (file_content) {
+                    size_t read_len = fread(file_content, 1, file_size, fp);
                     fclose(fp);
-                    buffer[header_max + read_len] = '\0';
+                    file_content[read_len] = '\0';
                     
-                    if (read_len == (size_t)file_size) {
-                        // Original JSON: {"total_duration":..., "total_segments":..., "segments":[...]}
-                        // Target JSON: {"type":"ws_init","status":"ok","total_duration":..., ...}
-                        
-                        // Find first '{' and skip it, then prepend our header
-                        char *json_start = buffer + header_max;
-                        while (*json_start && (*json_start == ' ' || *json_start == '\n' || *json_start == '\r' || *json_start == '\t')) {
-                            json_start++;
-                        }
-                        
-                        if (*json_start == '{') {
-                            json_start++; // Skip the opening brace
-                            // Skip any whitespace after {
-                            while (*json_start && (*json_start == ' ' || *json_start == '\n' || *json_start == '\r' || *json_start == '\t')) {
-                                json_start++;
-                            }
-                            
-                            // Calculate where to put our header
-                            const char *header = "{\"type\":\"ws_init\",\"status\":\"ok\",";
-                            size_t header_len = strlen(header);
-                            size_t content_len = strlen(json_start);
-                            
-                            // Create response in place
-                            char *resp_start = json_start - header_len;
-                            if (resp_start >= buffer) {
-                                memcpy(resp_start, header, header_len);
-                                size_t resp_len = header_len + content_len;
-                                int rc = ws_send_frame(fd, 0x1, (const uint8_t *)resp_start, resp_len);
-                                free(buffer);
-                                return rc;
-                            }
+                    // Find where JSON content starts (after opening brace and whitespace)
+                    char *content_start = file_content;
+                    while (*content_start && (*content_start == ' ' || *content_start == '\n' || *content_start == '\r' || *content_start == '\t')) {
+                        content_start++;
+                    }
+                    if (*content_start == '{') {
+                        content_start++;
+                        while (*content_start && (*content_start == ' ' || *content_start == '\n' || *content_start == '\r' || *content_start == '\t')) {
+                            content_start++;
                         }
                     }
-                    free(buffer);
+                    
+                    // Build response with header + content
+                    size_t content_len = strlen(content_start);
+                    size_t resp_size = 64 + content_len;
+                    char *resp = malloc(resp_size);
+                    if (resp) {
+                        int len = snprintf(resp, resp_size, "{\"type\":\"ws_init\",\"status\":\"ok\",%s", content_start);
+                        if (len > 0 && (size_t)len < resp_size) {
+                            int rc = ws_send_frame(fd, 0x1, (const uint8_t *)resp, (size_t)len);
+                            free(resp);
+                            free(file_content);
+                            return rc;
+                        }
+                        free(resp);
+                    }
+                    free(file_content);
                 }
             } else {
                 fclose(fp);

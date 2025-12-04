@@ -33,56 +33,71 @@ echo "Generating segment_info.json..."
 # 총 duration 가져오기
 TOTAL_DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$INPUT")
 
-# playlist.m3u8 파싱하여 segment_info.json 생성
-python3 - "$OUT_DIR/playlist.m3u8" "$OUT_DIR/segment_info.json" "$TOTAL_DURATION" << 'PYTHON_SCRIPT'
-import sys
-import json
-import re
+# 비디오 코덱 감지
+VIDEO_CODEC=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$INPUT")
+echo "Detected video codec: $VIDEO_CODEC"
 
-playlist_path = sys.argv[1]
-output_path = sys.argv[2]
-total_duration = float(sys.argv[3])
+# 코덱에 따른 MIME 타입 결정
+case "$VIDEO_CODEC" in
+  av1)
+    CODEC_STRING="av01.0.12M.08"
+    ;;
+  hevc|h265)
+    CODEC_STRING="hvc1.1.6.L120.90"
+    ;;
+  h264|avc)
+    CODEC_STRING="avc1.640028"
+    ;;
+  vp9)
+    CODEC_STRING="vp09.00.10.08"
+    ;;
+  *)
+    CODEC_STRING="avc1.640028"
+    echo "Warning: Unknown codec $VIDEO_CODEC, defaulting to H.264"
+    ;;
+esac
 
-segments = []
-current_time = 0.0
-
-with open(playlist_path, 'r') as f:
-    lines = f.readlines()
-
-for i, line in enumerate(lines):
-    line = line.strip()
-    if line.startswith('#EXTINF:'):
-        # #EXTINF:2.002000, 형식에서 duration 추출
-        match = re.match(r'#EXTINF:([\d.]+)', line)
-        if match:
-            duration = float(match.group(1))
-            # 다음 줄이 세그먼트 파일명
-            if i + 1 < len(lines):
-                segment_file = lines[i + 1].strip()
-                if segment_file and not segment_file.startswith('#'):
-                    # chunk-stream0-00000.m4s에서 인덱스 추출
-                    idx_match = re.search(r'(\d+)\.m4s$', segment_file)
-                    if idx_match:
-                        idx = int(idx_match.group(1))
-                        segments.append({
-                            'index': idx,
-                            'start': round(current_time, 3),
-                            'end': round(current_time + duration, 3),
-                            'duration': round(duration, 3)
-                        })
-                        current_time += duration
-
-result = {
-    'total_duration': round(total_duration, 3),
-    'total_segments': len(segments),
-    'segments': segments
+# playlist.m3u8 파싱하여 segment_info.json 생성 (awk 사용 - python 불필요)
+awk -v total_dur="$TOTAL_DURATION" -v video_codec="$VIDEO_CODEC" -v codec_string="$CODEC_STRING" '
+BEGIN {
+    current_time = 0
+    seg_count = 0
 }
+/^#EXTINF:/ {
+    gsub(/^#EXTINF:/, "")
+    gsub(/,.*$/, "")
+    duration = $0 + 0
+    getline segment_file
+    if (segment_file !~ /^#/) {
+        match(segment_file, /[0-9]+\.m4s$/)
+        seg_idx = substr(segment_file, RSTART, RLENGTH)
+        gsub(/\.m4s$/, "", seg_idx)
+        seg_idx = seg_idx + 0
+        
+        segments[seg_count] = sprintf("    {\"index\": %d, \"start\": %.3f, \"end\": %.3f, \"duration\": %.3f}", seg_idx, current_time, current_time + duration, duration)
+        current_time += duration
+        seg_count++
+    }
+}
+END {
+    print "{"
+    printf "  \"total_duration\": %.3f,\n", total_dur
+    printf "  \"total_segments\": %d,\n", seg_count
+    printf "  \"video_codec\": \"%s\",\n", video_codec
+    printf "  \"codec_string\": \"%s\",\n", codec_string
+    print "  \"segments\": ["
+    for (i = 0; i < seg_count; i++) {
+        if (i < seg_count - 1)
+            print segments[i] ","
+        else
+            print segments[i]
+    }
+    print "  ]"
+    print "}"
+}
+' "$OUT_DIR/playlist.m3u8" > "$OUT_DIR/segment_info.json"
 
-with open(output_path, 'w') as f:
-    json.dump(result, f, indent=2)
-
-print(f"Generated {output_path} with {len(segments)} segments")
-PYTHON_SCRIPT
+echo "Generated $OUT_DIR/segment_info.json with $(grep -c '"index"' "$OUT_DIR/segment_info.json") segments"
 
 # playlist.m3u8은 이제 필요없으므로 삭제 (segment_info.json으로 대체)
 rm -f "$OUT_DIR/playlist.m3u8"
