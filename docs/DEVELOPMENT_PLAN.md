@@ -396,12 +396,14 @@ ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:no
 ```
 
 **산출물**:
-- `src/server/streaming.c`, `src/server/streaming.h`
+- QUIC 스트림 전송 및 WebSocket 브리지 로직 (`src/server/websocket.c`)
+- fMP4 세그먼트 전송 브리지 및 MSE 플레이어
+- 스트림 제어 메시지(stream_start/seek/stop 등)
 
 **완료 기준**:
-- [ ] 영상 스트리밍 동작
-- [ ] 특정 위치 재생
-- [ ] 청크 단위 전송
+- [x] 영상 스트리밍 동작 (QUIC 전송 + WebSocket 브리지)
+- [x] 특정 위치 재생 (seek)
+- [x] 청크 단위 전송 (1MB 기본)
 
 ---
 
