@@ -4,6 +4,7 @@
 #include "auth/session.h"
 #include "db/database.h"
 #include "utils/thumbnail.h"
+#include "server/upload.h"
 
 #include <arpa/inet.h>
 #include <ctype.h>
@@ -87,6 +88,7 @@ static int send_json_response(int fd, const char *type, const char *status, cons
 static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t *frame, int user_id);
 static int handle_http_login(int fd, const http_request_t *req, websocket_context_t *ctx);
 static int handle_http_logout(int fd, const http_request_t *req, websocket_context_t *ctx);
+static int handle_http_upload(int fd, const http_request_t *req, const char *body, size_t body_len, websocket_context_t *ctx);
 static int send_http_response(int fd, const char *status_line, const char *headers, const char *body);
 static int send_video_chunk(websocket_context_t *ctx,
                             uint64_t connection_id,
@@ -254,11 +256,42 @@ int websocket_handle_client(int client_fd, websocket_context_t *ctx) {
             close(client_fd);
             return rc;
         }
+        if (ctx && ctx->db && strcmp(request.path, "/upload") == 0) {
+            const char *cl = http_get_header(&request, "content-length");
+            long content_len = cl ? strtol(cl, NULL, 10) : 0;
+            const char *sep = strstr(buffer, "\r\n\r\n");
+            size_t header_size = sep ? (size_t)(sep - buffer + 4) : received;
+            size_t already = received > header_size ? received - header_size : 0;
+            char *body_buf = NULL;
+            if (content_len > 0 && content_len < (20 * 1024 * 1024)) {
+                body_buf = malloc((size_t)content_len);
+            }
+            if (!body_buf) {
+                send_http_error(client_fd, "HTTP/1.1 400 Bad Request\r\n\r\n");
+                close(client_fd);
+                return -1;
+            }
+            if (already > 0 && already <= (size_t)content_len) {
+                memcpy(body_buf, buffer + header_size, already);
+            }
+            size_t remaining = (size_t)content_len - already;
+            if (remaining > 0 && read_exact(client_fd, body_buf + already, remaining) != 0) {
+                free(body_buf);
+                send_http_error(client_fd, "HTTP/1.1 400 Bad Request\r\n\r\n");
+                close(client_fd);
+                return -1;
+            }
+            int rc = handle_http_upload(client_fd, &request, body_buf, (size_t)content_len, ctx);
+            free(body_buf);
+            close(client_fd);
+            return rc;
+        }
         send_http_error(client_fd, "HTTP/1.1 400 Bad Request\r\n\r\n");
         close(client_fd);
         return -1;
     }
 
+    int current_user_id = 0;
     /* optional: extend session if provided */
     if (ctx && ctx->db) {
         char sid[SESSION_ID_LEN + 1];
@@ -271,14 +304,6 @@ int websocket_handle_client(int client_fd, websocket_context_t *ctx) {
         send_http_error(client_fd, "HTTP/1.1 500 Internal Server Error\r\n\r\n");
         close(client_fd);
         return -1;
-    }
-
-    int current_user_id = 0;
-    if (ctx && ctx->db) {
-        char sid[SESSION_ID_LEN + 1];
-        if (session_extract_from_headers(&request, sid, sizeof(sid)) == 0) {
-            session_validate_and_extend(ctx->db, sid, SESSION_TTL_SECONDS, &current_user_id);
-        }
     }
 
     if (send_json_response(client_fd, "ready", "ok", "websocket-ready") != 0) {
@@ -351,6 +376,20 @@ static int buffer_contains_clrf(const char *buf, size_t len) {
 
 static int send_http_error(int fd, const char *status_line) {
     return write_all(fd, status_line, strlen(status_line));
+}
+
+static int handle_http_upload(int fd, const http_request_t *req, const char *body, size_t body_len, websocket_context_t *ctx) {
+    (void)req;
+    if (!ctx || !ctx->db) {
+        return send_http_response(fd, "HTTP/1.1 503 Service Unavailable\r\n", "Content-Type: text/plain\r\n", "service-unavailable");
+    }
+    if (!body || body_len == 0) {
+        return send_http_response(fd, "HTTP/1.1 400 Bad Request\r\n", "Content-Type: text/plain\r\n", "empty-body");
+    }
+    if (handle_upload_request(fd, NULL, body, body_len, ctx->db) != 0) {
+        return send_http_response(fd, "HTTP/1.1 500 Internal Server Error\r\n", "Content-Type: text/plain\r\n", "upload-failed");
+    }
+    return 0;
 }
 
 static int send_http_response(int fd, const char *status_line, const char *headers, const char *body) {

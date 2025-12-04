@@ -32,13 +32,14 @@ function connect() {
         handleMessage(data);
       } catch (e) {
         log(`recv: ${ev.data}`);
+    showToast("서버 응답 오류");
       }
     } else {
       handleBinary(ev.data);
     }
   };
-  socket.onerror = (err) => log('ws error ' + err);
-  socket.onclose = () => log('WebSocket closed');
+  socket.onerror = (err) => { log('ws error ' + err); showToast('WebSocket 오류');};
+  socket.onclose = () => { log('WebSocket closed'); showToast('연결이 종료되었습니다');};
 }
 
 function send(obj) {
@@ -320,4 +321,12 @@ function saveWatch() {
   const pos = parseInt(document.getElementById('seek-offset').value, 10) || 0;
   if (!currentVideo) return;
   send({type: 'watch_update', video_id: currentVideo, position: pos});
+}
+
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.remove('hidden');
+  setTimeout(() => t.classList.add('hidden'), 2500);
 }
