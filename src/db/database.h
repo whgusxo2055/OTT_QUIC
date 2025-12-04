@@ -33,6 +33,7 @@ typedef struct {
     char username[DB_MAX_USERNAME];
     char nickname[DB_MAX_NICKNAME];
     char password_hash[DB_MAX_PATH];
+    char role[16];
     char created_at[DB_MAX_TIMESTAMP];
 } db_user_t;
 
@@ -63,6 +64,7 @@ int db_create_user(db_context_t *ctx,
                    const char *username,
                    const char *nickname,
                    const char *password_hash,
+                   const char *role,
                    int *out_user_id);
 int db_get_user_by_username(db_context_t *ctx, const char *username, db_user_t *out_user);
 int db_delete_user_by_id(db_context_t *ctx, int user_id);

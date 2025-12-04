@@ -97,8 +97,9 @@
 
   <script>
     const apiHost = location.hostname || 'localhost';
-    const apiPort = '8080';
-    const apiBase = `${location.protocol}//${apiHost}:${apiPort}`;
+    const apiPort = '8443';
+    const useHttps = location.protocol === 'https:';
+    const apiBase = `${useHttps ? 'https' : 'http'}://${apiHost}:${apiPort}`;
 
     async function handleLogin() {
       const user = document.getElementById('username').value;

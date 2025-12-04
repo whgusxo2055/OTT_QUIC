@@ -7,6 +7,11 @@
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
+#ifdef ENABLE_TLS
+#include <openssl/ssl.h>
+#else
+typedef struct ssl_st SSL;
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,7 +29,7 @@ typedef struct websocket_context {
 void websocket_context_init(websocket_context_t *ctx, quic_engine_t *engine, db_context_t *db);
 void websocket_context_destroy(websocket_context_t *ctx);
 
-int websocket_handle_client(int client_fd, websocket_context_t *ctx);
+int websocket_handle_client(int client_fd, SSL *ssl, websocket_context_t *ctx);
 int websocket_calculate_accept_key(const char *client_key, char *out, size_t out_size);
 void websocket_apply_mask(uint8_t *data, size_t len, const uint8_t mask[4]);
 

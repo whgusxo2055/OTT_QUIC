@@ -1,7 +1,8 @@
 const apiHost = location.hostname || 'localhost';
-const apiPort = '8080';
-const apiBase = `${location.protocol}//${apiHost}:${apiPort}`;
-const wsUrl = `ws://${apiHost}:${apiPort}`;
+const apiPort = '8443';
+const useHttps = location.protocol === 'https:';
+const apiBase = `${useHttps ? 'https' : 'http'}://${apiHost}:${apiPort}`;
+const wsUrl = `${useHttps ? 'wss' : 'ws'}://${apiHost}:${apiPort}`;
 
 function checkLogin() {
   const sid = localStorage.getItem('ott_session_id');

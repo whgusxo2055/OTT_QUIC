@@ -3,15 +3,15 @@ services:
     build: .
     container_name: ott_quic_dev
     ports:
-      - "8080:8080"
-      - "8443:8443/udp"
+      - "8443:8443"
+      - "9443:9443/udp"
     volumes:
       - ./data:/app/data
       - ./web:/app/web:ro
     command: ["./build/ott_server"]
     environment:
       - HOST=0.0.0.0
-      - PORT=8080
+      - PORT=8443
   static_web:
     image: nginx:alpine
     container_name: ott_quic_static

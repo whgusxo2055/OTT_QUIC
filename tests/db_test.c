@@ -17,7 +17,7 @@ int main(void) {
     hash_password("secret", hash, sizeof(hash));
 
     int user_id = 0;
-    rc = db_create_user(&ctx, "alice", "Alice", hash, &user_id);
+    rc = db_create_user(&ctx, "alice", "Alice", hash, "user", &user_id);
     assert(rc == SQLITE_OK);
     assert(user_id > 0);
 
@@ -25,6 +25,7 @@ int main(void) {
     rc = db_get_user_by_username(&ctx, "alice", &user);
     assert(rc == SQLITE_OK);
     assert(user.id == user_id);
+    assert(strcmp(user.role, "user") == 0);
 
     int video_id = 0;
     rc = db_create_video(&ctx,

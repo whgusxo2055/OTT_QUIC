@@ -4,6 +4,13 @@ CPPFLAGS := -Isrc -Isrc/auth
 LDFLAGS :=
 LDLIBS := -lsqlite3 -pthread
 
+TLS ?= 0
+
+ifeq ($(TLS),1)
+CPPFLAGS += -DENABLE_TLS
+LDLIBS += -lssl -lcrypto
+endif
+
 BUILD_DIR := build
 TARGET := $(BUILD_DIR)/ott_server
 

@@ -13,7 +13,7 @@ WORKDIR /app
 COPY . .
 RUN rm -rf build && make
 
-EXPOSE 8080/tcp
-EXPOSE 8443/udp
+EXPOSE 8443/tcp
+EXPOSE 9443/udp
 
 CMD ["./build/ott_server"]

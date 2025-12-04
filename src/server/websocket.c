@@ -1,6 +1,10 @@
 #include "server/websocket.h"
 
 #include "server/http.h"
+#include "http/api.h"
+#ifdef ENABLE_TLS
+#include <openssl/ssl.h>
+#endif
 #include "auth/session.h"
 #include "db/database.h"
 #include "utils/thumbnail.h"
@@ -24,6 +28,11 @@
 #define WS_MAX_FRAME_PAYLOAD (64 * 1024)
 #define STREAM_MAX_CHUNK (1024 * 1024)
 #define VIDEO_BASE_PATH "data/videos"
+
+typedef struct {
+    int fd;
+    SSL *ssl; /* optional */
+} ws_io_t;
 
 typedef struct {
     uint8_t opcode;
@@ -64,18 +73,20 @@ typedef struct {
     int segment_index;
 } ws_command_t;
 
-static int read_http_request(int fd, char *buffer, size_t buf_size, size_t *out_len);
-static int send_http_error(int fd, const char *status_line);
-static int perform_handshake(int fd, http_request_t *request);
+static int io_read(ws_io_t *io, void *buf, size_t len);
+static int io_write(ws_io_t *io, const void *buf, size_t len);
+static int read_http_request(ws_io_t *io, char *buffer, size_t buf_size, size_t *out_len);
+static int send_http_error(ws_io_t *io, const char *status_line);
+static int perform_handshake(ws_io_t *io, http_request_t *request);
 static int validate_websocket_request(const http_request_t *req);
 static int buffer_contains_clrf(const char *buf, size_t len);
-static int ws_read_frame(int fd, ws_frame_t *frame);
+static int ws_read_frame(ws_io_t *io, ws_frame_t *frame);
 static void ws_free_frame(ws_frame_t *frame);
-static int ws_send_frame(int fd, uint8_t opcode, const uint8_t *payload, size_t payload_len);
+static int ws_send_frame(ws_io_t *io, uint8_t opcode, const uint8_t *payload, size_t payload_len);
 static void sha1_compute(const uint8_t *data, size_t len, uint8_t out[20]);
 static int base64_encode(const uint8_t *data, size_t len, char *out, size_t out_size);
-static int read_exact(int fd, void *buf, size_t len);
-static int write_all(int fd, const void *buf, size_t len);
+static int read_exact(ws_io_t *io, void *buf, size_t len);
+static int write_all(ws_io_t *io, const void *buf, size_t len);
 static int header_contains_token(const char *value, const char *token);
 static const char *json_find_value(const char *json, const char *key);
 static int json_extract_string_field(const char *json, const char *key, char *out, size_t out_size);
@@ -84,14 +95,8 @@ static int json_extract_uint32_field(const char *json, const char *key, uint32_t
 static int json_extract_int_field(const char *json, const char *key, int *out);
 static int parse_command(const char *text, ws_command_t *cmd);
 static int hex_to_bytes(const char *hex, uint8_t *out, size_t max_len, size_t *out_len);
-static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t *frame, int user_id);
-static int send_json_response(int fd, const char *type, const char *status, const char *message);
-static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t *frame, int user_id);
-static int handle_http_login(int fd, const http_request_t *req, websocket_context_t *ctx, const char *pre_read_buf, size_t pre_read_len);
-static int handle_http_logout(int fd, const http_request_t *req, websocket_context_t *ctx);
-static int handle_http_upload(int fd, const http_request_t *req, const char *body, size_t body_len, websocket_context_t *ctx);
-static int send_http_response(int fd, const char *status_line, const char *headers, const char *body);
-static void build_cors_header(const http_request_t *req, char *out, size_t out_size);
+static int handle_text_frame(ws_io_t *io, websocket_context_t *ctx, const ws_frame_t *frame, int user_id);
+static int send_json_response(ws_io_t *io, const char *type, const char *status, const char *message);
 static int send_video_chunk(websocket_context_t *ctx,
                             uint64_t connection_id,
                             uint32_t stream_id,
@@ -99,7 +104,7 @@ static int send_video_chunk(websocket_context_t *ctx,
                             uint32_t offset,
                             uint32_t length,
                             uint32_t *next_packet_number);
-static int send_ws_file(int fd, const char *path, const char magic[4], uint32_t index) {
+static int send_ws_file(ws_io_t *io, const char *path, const char magic[4], uint32_t index) {
     FILE *fp = fopen(path, "rb");
     if (!fp) {
         return -1;
@@ -134,7 +139,7 @@ static int send_ws_file(int fd, const char *path, const char magic[4], uint32_t 
         return -1;
     }
 
-    int rc = ws_send_frame(fd, 0x2, buf, total);
+    int rc = ws_send_frame(io, 0x2, buf, total);
     free(buf);
     return rc;
 }
@@ -229,86 +234,38 @@ static int send_video_chunk(websocket_context_t *ctx,
     return 0;
 }
 
-int websocket_handle_client(int client_fd, websocket_context_t *ctx) {
+int websocket_handle_client(int client_fd, SSL *ssl, websocket_context_t *ctx) {
     struct timeval tv = {.tv_sec = 5, .tv_usec = 0};
     setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
+    ws_io_t io = {.fd = client_fd, .ssl = ssl};
+
     char buffer[WS_MAX_HTTP_BUFFER];
     size_t received = 0;
-    if (read_http_request(client_fd, buffer, sizeof(buffer), &received) != 0) {
-        send_http_error(client_fd, "HTTP/1.1 400 Bad Request\r\n\r\n");
+    if (read_http_request(&io, buffer, sizeof(buffer), &received) != 0) {
+        send_http_error(&io, "HTTP/1.1 400 Bad Request\r\n\r\n");
         close(client_fd);
         return -1;
     }
 
     http_request_t request;
     if (http_parse_request(buffer, received, &request) != 0) {
-        send_http_error(client_fd, "HTTP/1.1 400 Bad Request\r\n\r\n");
+        send_http_error(&io, "HTTP/1.1 400 Bad Request\r\n\r\n");
         close(client_fd);
         return -1;
     }
 
     if (validate_websocket_request(&request) != 0) {
-        if (ctx && ctx->db && strcmp(request.path, "/login") == 0) {
-            const char *sep = strstr(buffer, "\r\n\r\n");
-            size_t header_size = sep ? (size_t)(sep - buffer + 4) : received;
-            size_t already = received > header_size ? received - header_size : 0;
-            int rc = handle_http_login(client_fd, &request, ctx, buffer + header_size, already);
+        const char *sep = strstr(buffer, "\r\n\r\n");
+        size_t header_size = sep ? (size_t)(sep - buffer + 4) : received;
+        size_t already = received > header_size ? received - header_size : 0;
+        if (ctx && ctx->db) {
+            int rc = http_api_handle(client_fd, io.ssl, &request, ctx, buffer + header_size, already);
             close(client_fd);
             return rc;
         }
-        if (ctx && ctx->db && strcmp(request.path, "/logout") == 0) {
-            int rc = handle_http_logout(client_fd, &request, ctx);
-            close(client_fd);
-            return rc;
-        }
-        if (ctx && ctx->db && strcmp(request.path, "/upload") == 0) {
-            if (strcasecmp(request.method, "OPTIONS") == 0) {
-                char cors[256];
-                build_cors_header(&request, cors, sizeof(cors));
-                send_http_response(client_fd, "HTTP/1.1 204 No Content\r\n", cors, "");
-                close(client_fd);
-                return 0;
-            }
-            const char *cl = http_get_header(&request, "content-length");
-            const size_t MAX_UPLOAD_BYTES = (size_t)2 * 1024 * 1024 * 1024ULL;
-            long content_len_long = cl ? strtol(cl, NULL, 10) : 0;
-            if (content_len_long <= 0 || (size_t)content_len_long > MAX_UPLOAD_BYTES) {
-                send_http_error(client_fd, "HTTP/1.1 413 Payload Too Large\r\n\r\n");
-                close(client_fd);
-                return -1;
-            }
-            size_t content_len = (size_t)content_len_long;
-            const char *sep = strstr(buffer, "\r\n\r\n");
-            size_t header_size = sep ? (size_t)(sep - buffer + 4) : received;
-            size_t already = received > header_size ? received - header_size : 0;
-            char *body_buf = NULL;
-            body_buf = malloc(content_len);
-            if (!body_buf) {
-                send_http_error(client_fd, "HTTP/1.1 500 Internal Server Error\r\n\r\n");
-                close(client_fd);
-                return -1;
-            }
-            if (already > 0 && already <= content_len) {
-                memcpy(body_buf, buffer + header_size, already);
-            }
-            size_t remaining = content_len - already;
-            if (remaining > 0 && read_exact(client_fd, body_buf + already, remaining) != 0) {
-                free(body_buf);
-                send_http_error(client_fd, "HTTP/1.1 400 Bad Request\r\n\r\n");
-                close(client_fd);
-                return -1;
-            }
-            int rc = handle_http_upload(client_fd, &request, body_buf, content_len, ctx);
-            free(body_buf);
-            close(client_fd);
-            if (rc != 0) {
-                send_http_error(client_fd, "HTTP/1.1 400 Bad Request\r\n\r\n");
-            }
-            return rc;
-        }
-        send_http_error(client_fd, "HTTP/1.1 400 Bad Request\r\n\r\n");
+        send_http_error(&io, "HTTP/1.1 400 Bad Request\r\n\r\n");
         close(client_fd);
         return -1;
     }
@@ -322,37 +279,37 @@ int websocket_handle_client(int client_fd, websocket_context_t *ctx) {
         }
     }
 
-    if (perform_handshake(client_fd, &request) != 0) {
-        send_http_error(client_fd, "HTTP/1.1 500 Internal Server Error\r\n\r\n");
+    if (perform_handshake(&io, &request) != 0) {
+        send_http_error(&io, "HTTP/1.1 500 Internal Server Error\r\n\r\n");
         close(client_fd);
         return -1;
     }
 
-    if (send_json_response(client_fd, "ready", "ok", "websocket-ready") != 0) {
+    if (send_json_response(&io, "ready", "ok", "websocket-ready") != 0) {
         close(client_fd);
         return -1;
     }
 
     while (1) {
         ws_frame_t frame = {0};
-        if (ws_read_frame(client_fd, &frame) != 0) {
+        if (ws_read_frame(&io, &frame) != 0) {
             break;
         }
 
         if (frame.opcode == 0x1) {
-            if (handle_text_frame(client_fd, ctx, &frame, current_user_id) != 0 && frame.payload) {
-                ws_send_frame(client_fd, 0x1, frame.payload, (size_t)frame.payload_len);
+            if (handle_text_frame(&io, ctx, &frame, current_user_id) != 0 && frame.payload) {
+                ws_send_frame(&io, 0x1, frame.payload, (size_t)frame.payload_len);
             }
         } else if (frame.opcode == 0x2 || frame.opcode == 0x0) {
-            ws_send_frame(client_fd, frame.opcode ? frame.opcode : 0x1, frame.payload, (size_t)frame.payload_len);
+            ws_send_frame(&io, frame.opcode ? frame.opcode : 0x1, frame.payload, (size_t)frame.payload_len);
         } else if (frame.opcode == 0x8) {
-            ws_send_frame(client_fd, 0x8, frame.payload, (size_t)frame.payload_len);
+            ws_send_frame(&io, 0x8, frame.payload, (size_t)frame.payload_len);
             ws_free_frame(&frame);
             break;
         } else if (frame.opcode == 0x9) {
-            ws_send_frame(client_fd, 0xA, frame.payload, (size_t)frame.payload_len);
+            ws_send_frame(&io, 0xA, frame.payload, (size_t)frame.payload_len);
         } else {
-            ws_send_frame(client_fd, 0x8, NULL, 0);
+            ws_send_frame(&io, 0x8, NULL, 0);
             ws_free_frame(&frame);
             break;
         }
@@ -364,11 +321,11 @@ int websocket_handle_client(int client_fd, websocket_context_t *ctx) {
     return 0;
 }
 
-static int read_http_request(int fd, char *buffer, size_t buf_size, size_t *out_len) {
+static int read_http_request(ws_io_t *io, char *buffer, size_t buf_size, size_t *out_len) {
     size_t total = 0;
 
     while (total < buf_size) {
-        ssize_t n = recv(fd, buffer + total, buf_size - total, 0);
+        int n = io_read(io, buffer + total, buf_size - total);
         if (n <= 0) {
             return -1;
         }
@@ -396,73 +353,8 @@ static int buffer_contains_clrf(const char *buf, size_t len) {
     return 0;
 }
 
-static int send_http_error(int fd, const char *status_line) {
-    return write_all(fd, status_line, strlen(status_line));
-}
-
-static int handle_http_upload(int fd, const http_request_t *req, const char *body, size_t body_len, websocket_context_t *ctx) {
-    char cors[256];
-    build_cors_header(req, cors, sizeof(cors));
-    
-    if (!ctx || !ctx->db) {
-        char headers[512];
-        snprintf(headers, sizeof(headers), "Content-Type: text/plain\r\n%s", cors);
-        return send_http_response(fd, "HTTP/1.1 503 Service Unavailable\r\n", headers, "service-unavailable");
-    }
-    if (!body || body_len == 0) {
-        char headers[512];
-        snprintf(headers, sizeof(headers), "Content-Type: text/plain\r\n%s", cors);
-        return send_http_response(fd, "HTTP/1.1 400 Bad Request\r\n", headers, "empty-body");
-    }
-    const char *ct = http_get_header(req, "content-type");
-    char headers[512];
-    if (ct) {
-        snprintf(headers, sizeof(headers), "Content-Type: %s\r\n", ct);
-    } else {
-        headers[0] = '\0';
-    }
-    if (handle_upload_request(fd, headers, body, body_len, ctx->db) != 0) {
-        char err_headers[512];
-        snprintf(err_headers, sizeof(err_headers), "Content-Type: text/plain\r\n%s", cors);
-        return send_http_response(fd, "HTTP/1.1 500 Internal Server Error\r\n", err_headers, "upload-failed");
-    }
-    return 0;
-}
-
-static int send_http_response(int fd, const char *status_line, const char *headers, const char *body) {
-    if (!status_line) {
-        return -1;
-    }
-    const char *body_safe = body ? body : "";
-    char buffer[1024];
-    int len = snprintf(buffer,
-                       sizeof(buffer),
-                       "%s"
-                       "Content-Length: %zu\r\n"
-                       "%s"
-                       "\r\n"
-                       "%s",
-                       status_line,
-                       strlen(body_safe),
-                       headers ? headers : "",
-                       body_safe);
-    if (len <= 0 || (size_t)len >= sizeof(buffer)) {
-        return -1;
-    }
-    return write_all(fd, buffer, (size_t)len);
-}
-
-static void build_cors_header(const http_request_t *req, char *out, size_t out_size) {
-    if (!out || out_size == 0) return;
-    const char *origin = req ? http_get_header(req, "origin") : NULL;
-    const char *use_origin = origin && strlen(origin) < 200 ? origin : "*";
-    snprintf(out,
-             out_size,
-             "Access-Control-Allow-Origin: %s\r\n"
-             "Access-Control-Allow-Credentials: true\r\n"
-             "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
-             "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n",
-             use_origin);
+static int send_http_error(ws_io_t *io, const char *status_line) {
+    return write_all(io, status_line, strlen(status_line));
 }
 
 static int header_contains_token(const char *value, const char *token) {
@@ -516,109 +408,7 @@ static int validate_websocket_request(const http_request_t *req) {
     return 0;
 }
 
-static int handle_http_login(int fd, const http_request_t *req, websocket_context_t *ctx, const char *pre_read_buf, size_t pre_read_len) {
-    if (!ctx || !ctx->db) {
-        return send_http_response(fd, "HTTP/1.1 503 Service Unavailable\r\n", "Content-Type: text/plain\r\n", "service-unavailable");
-    }
-    if (strcasecmp(req->method, "OPTIONS") == 0) {
-        char cors[256];
-        build_cors_header(req, cors, sizeof(cors));
-        return send_http_response(fd, "HTTP/1.1 204 No Content\r\n", cors, "");
-    }
-    if (strcasecmp(req->method, "POST") != 0) {
-        return send_http_response(fd, "HTTP/1.1 405 Method Not Allowed\r\n", "Content-Type: text/plain\r\n", "method-not-allowed");
-    }
-
-    const char *cl = http_get_header(req, "content-length");
-    if (!cl) {
-        return send_http_response(fd, "HTTP/1.1 400 Bad Request\r\n", "Content-Type: text/plain\r\n", "missing-content-length");
-    }
-    long body_len = strtol(cl, NULL, 10);
-    if (body_len <= 0 || body_len > 1024) {
-        return send_http_response(fd, "HTTP/1.1 400 Bad Request\r\n", "Content-Type: text/plain\r\n", "invalid-content-length");
-    }
-
-    char body[1025];
-    size_t to_copy = pre_read_len > (size_t)body_len ? (size_t)body_len : pre_read_len;
-    if (to_copy > 0) {
-        memcpy(body, pre_read_buf, to_copy);
-    }
-    
-    size_t remaining = (size_t)body_len - to_copy;
-    if (remaining > 0) {
-        if (read_exact(fd, body + to_copy, remaining) != 0) {
-            return send_http_response(fd, "HTTP/1.1 400 Bad Request\r\n", "Content-Type: text/plain\r\n", "body-read-failed");
-        }
-    }
-    body[body_len] = '\0';
-
-    char user[128];
-    char pass[128];
-    if (json_extract_string_field(body, "username", user, sizeof(user)) != 0 ||
-        json_extract_string_field(body, "password", pass, sizeof(pass)) != 0) {
-        return send_http_response(fd, "HTTP/1.1 400 Bad Request\r\n", "Content-Type: text/plain\r\n", "bad-json");
-    }
-
-    char sid[SESSION_ID_LEN + 1];
-    if (session_login(ctx->db, user, pass, sid, sizeof(sid)) != 0) {
-        return send_http_response(fd, "HTTP/1.1 401 Unauthorized\r\n", "Content-Type: text/plain\r\n", "login-failed");
-    }
-
-    char headers[512];
-    char cors[256];
-    build_cors_header(req, cors, sizeof(cors));
-    int hlen = snprintf(headers,
-                        sizeof(headers),
-                        "Content-Type: application/json\r\n"
-                        "Set-Cookie: SID=%s; HttpOnly; Path=/; SameSite=Lax\r\n"
-                        "%s",
-                        sid,
-                        cors);
-    if (hlen < 0 || (size_t)hlen >= sizeof(headers)) {
-        return send_http_response(fd, "HTTP/1.1 500 Internal Server Error\r\n", "Content-Type: text/plain\r\n", "header-too-long");
-    }
-    
-    int is_admin = 0;
-    if (strncmp(user, "admin", 5) == 0) {
-        is_admin = 1;
-    }
-
-    char resp_body[512];
-    snprintf(resp_body, sizeof(resp_body), "{\"session_id\":\"%s\",\"username\":\"%s\",\"is_admin\":%s}", 
-             sid, user, is_admin ? "true" : "false");
-    return send_http_response(fd, "HTTP/1.1 200 OK\r\n", headers, resp_body);
-}
-
-static int handle_http_logout(int fd, const http_request_t *req, websocket_context_t *ctx) {
-    if (!ctx || !ctx->db) {
-        return send_http_response(fd, "HTTP/1.1 503 Service Unavailable\r\n", "Content-Type: text/plain\r\n", "service-unavailable");
-    }
-    if (strcasecmp(req->method, "OPTIONS") == 0) {
-        char cors[256];
-        build_cors_header(req, cors, sizeof(cors));
-        return send_http_response(fd, "HTTP/1.1 204 No Content\r\n", cors, "");
-    }
-    char sid[SESSION_ID_LEN + 1];
-    if (session_extract_from_headers(req, sid, sizeof(sid)) != 0) {
-        return send_http_response(fd, "HTTP/1.1 400 Bad Request\r\n", "Content-Type: text/plain\r\n", "session-missing");
-    }
-    session_logout(ctx->db, sid);
-    char cors[256];
-    build_cors_header(req, cors, sizeof(cors));
-    char headers[512];
-    int hlen = snprintf(headers,
-                        sizeof(headers),
-                        "Content-Type: text/plain\r\n"
-                        "Set-Cookie: SID=; Max-Age=0; HttpOnly; Path=/; SameSite=Lax\r\n"
-                        "%s",
-                        cors);
-    if (hlen < 0 || (size_t)hlen >= sizeof(headers)) {
-        return send_http_response(fd, "HTTP/1.1 500 Internal Server Error\r\n", "Content-Type: text/plain\r\n", "header-too-long");
-    }
-    return send_http_response(fd, "HTTP/1.1 200 OK\r\n", headers, "logged-out");
-}
-
-static int perform_handshake(int fd, http_request_t *request) {
+static int perform_handshake(ws_io_t *io, http_request_t *request) {
     const char *client_key = http_get_header(request, "sec-websocket-key");
     if (!client_key) {
         return -1;
@@ -642,7 +432,7 @@ static int perform_handshake(int fd, http_request_t *request) {
         return -1;
     }
 
-    return write_all(fd, response, (size_t)len);
+    return write_all(io, response, (size_t)len);
 }
 
 int websocket_calculate_accept_key(const char *client_key, char *out, size_t out_size) {
@@ -678,9 +468,9 @@ void websocket_apply_mask(uint8_t *data, size_t len, const uint8_t mask[4]) {
     }
 }
 
-static int ws_read_frame(int fd, ws_frame_t *frame) {
+static int ws_read_frame(ws_io_t *io, ws_frame_t *frame) {
     uint8_t header[2];
-    if (read_exact(fd, header, sizeof(header)) != 0) {
+    if (read_exact(io, header, sizeof(header)) != 0) {
         return -1;
     }
 
@@ -691,13 +481,13 @@ static int ws_read_frame(int fd, ws_frame_t *frame) {
 
     if (payload_len == 126) {
         uint8_t extended[2];
-        if (read_exact(fd, extended, sizeof(extended)) != 0) {
+        if (read_exact(io, extended, sizeof(extended)) != 0) {
             return -1;
         }
         payload_len = (extended[0] << 8) | extended[1];
     } else if (payload_len == 127) {
         uint8_t extended[8];
-        if (read_exact(fd, extended, sizeof(extended)) != 0) {
+        if (read_exact(io, extended, sizeof(extended)) != 0) {
             return -1;
         }
         payload_len = 0;
@@ -712,7 +502,7 @@ static int ws_read_frame(int fd, ws_frame_t *frame) {
 
     uint8_t mask_key[4] = {0};
     if (mask_flag) {
-        if (read_exact(fd, mask_key, sizeof(mask_key)) != 0) {
+        if (read_exact(io, mask_key, sizeof(mask_key)) != 0) {
             return -1;
         }
     }
@@ -724,7 +514,7 @@ static int ws_read_frame(int fd, ws_frame_t *frame) {
         if (!frame->payload) {
             return -1;
         }
-        if (read_exact(fd, frame->payload, (size_t)payload_len) != 0) {
+        if (read_exact(io, frame->payload, (size_t)payload_len) != 0) {
             free(frame->payload);
             frame->payload = NULL;
             return -1;
@@ -744,7 +534,7 @@ static void ws_free_frame(ws_frame_t *frame) {
     }
 }
 
-static int ws_send_frame(int fd, uint8_t opcode, const uint8_t *payload, size_t payload_len) {
+static int ws_send_frame(ws_io_t *io, uint8_t opcode, const uint8_t *payload, size_t payload_len) {
     uint8_t header[10];
     size_t header_len = 0;
 
@@ -765,22 +555,50 @@ static int ws_send_frame(int fd, uint8_t opcode, const uint8_t *payload, size_t 
         header_len = 10;
     }
 
-    if (write_all(fd, header, header_len) != 0) {
+    if (write_all(io, header, header_len) != 0) {
         return -1;
     }
 
-    if (payload_len > 0 && write_all(fd, payload, payload_len) != 0) {
+    if (payload_len > 0 && write_all(io, payload, payload_len) != 0) {
         return -1;
     }
 
     return 0;
 }
 
-static int read_exact(int fd, void *buf, size_t len) {
+static int io_read(ws_io_t *io, void *buf, size_t len) {
+    if (!io || len == 0) {
+        return -1;
+    }
+#ifdef ENABLE_TLS
+    if (io->ssl) {
+        int n = SSL_read(io->ssl, buf, (int)len);
+        return n <= 0 ? -1 : n;
+    }
+#endif
+    ssize_t n = recv(io->fd, buf, len, 0);
+    return n <= 0 ? -1 : (int)n;
+}
+
+static int io_write(ws_io_t *io, const void *buf, size_t len) {
+    if (!io || len == 0) {
+        return -1;
+    }
+#ifdef ENABLE_TLS
+    if (io->ssl) {
+        int n = SSL_write(io->ssl, buf, (int)len);
+        return n <= 0 ? -1 : n;
+    }
+#endif
+    ssize_t n = send(io->fd, buf, len, MSG_NOSIGNAL);
+    return n <= 0 ? -1 : (int)n;
+}
+
+static int read_exact(ws_io_t *io, void *buf, size_t len) {
     uint8_t *ptr = buf;
     size_t total = 0;
     while (total < len) {
-        ssize_t n = recv(fd, ptr + total, len - total, 0);
+        int n = io_read(io, ptr + total, len - total);
         if (n <= 0) {
             return -1;
         }
@@ -789,11 +607,11 @@ static int read_exact(int fd, void *buf, size_t len) {
     return 0;
 }
 
-static int write_all(int fd, const void *buf, size_t len) {
+static int write_all(ws_io_t *io, const void *buf, size_t len) {
     const uint8_t *ptr = buf;
     size_t total = 0;
     while (total < len) {
-        ssize_t n = send(fd, ptr + total, len - total, MSG_NOSIGNAL);
+        int n = io_write(io, ptr + total, len - total);
         if (n <= 0) {
             return -1;
         }
@@ -802,7 +620,7 @@ static int write_all(int fd, const void *buf, size_t len) {
     return 0;
 }
 
-static int send_json_response(int fd, const char *type, const char *status, const char *message) {
+static int send_json_response(ws_io_t *io, const char *type, const char *status, const char *message) {
     char payload[256];
     const char *safe_message = message ? message : "";
     int len = snprintf(payload,
@@ -818,7 +636,7 @@ static int send_json_response(int fd, const char *type, const char *status, cons
         len = (int)sizeof(payload) - 1;
         payload[len] = '\0';
     }
-    return ws_send_frame(fd, 0x1, (const uint8_t *)payload, (size_t)len);
+    return ws_send_frame(io, 0x1, (const uint8_t *)payload, (size_t)len);
 }
 
 static const char *json_find_value(const char *json, const char *key) {
@@ -1066,14 +884,14 @@ static int parse_command(const char *text, ws_command_t *cmd) {
     return -1;
 }
 
-static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t *frame, int user_id) {
+static int handle_text_frame(ws_io_t *io, websocket_context_t *ctx, const ws_frame_t *frame, int user_id) {
     if (!frame->payload || frame->payload_len == 0) {
-        return send_json_response(fd, "error", "bad_request", "empty-payload");
+        return send_json_response(io, "error", "bad_request", "empty-payload");
     }
 
     char *text = malloc((size_t)frame->payload_len + 1);
     if (!text) {
-        return send_json_response(fd, "error", "internal_error", "alloc-failed");
+        return send_json_response(io, "error", "internal_error", "alloc-failed");
     }
     memcpy(text, frame->payload, (size_t)frame->payload_len);
     text[frame->payload_len] = '\0';
@@ -1081,22 +899,22 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
     ws_command_t cmd;
     if (parse_command(text, &cmd) != 0) {
         free(text);
-        return send_json_response(fd, "error", "bad_request", "unknown-command");
+        return send_json_response(io, "error", "bad_request", "unknown-command");
     }
     free(text);
 
     if (cmd.type == WS_CMD_PING) {
-        return send_json_response(fd, "pong", "ok", "alive");
+        return send_json_response(io, "pong", "ok", "alive");
     }
 
     if (cmd.type == WS_CMD_QUIC_SEND) {
         if (!ctx || !ctx->quic_engine) {
-            return send_json_response(fd, "error", "unavailable", "quic-engine-missing");
+            return send_json_response(io, "error", "unavailable", "quic-engine-missing");
         }
 
         quic_connection_state_t state;
         if (quic_engine_get_connection_state(ctx->quic_engine, cmd.connection_id, &state) != 0) {
-            return send_json_response(fd, "error", "connection-not-found", "quic-connection-not-found");
+            return send_json_response(io, "error", "connection-not-found", "quic-connection-not-found");
         }
         if (state != QUIC_CONN_STATE_CONNECTED) {
             const char *state_str = "unknown";
@@ -1109,7 +927,7 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
             }
             char detail[128];
             snprintf(detail, sizeof(detail), "quic-connection-not-ready(%s)", state_str);
-            return send_json_response(fd, "error", "connection-not-ready", detail);
+            return send_json_response(io, "error", "connection-not-ready", detail);
         }
 
         quic_packet_t packet = {
@@ -1126,7 +944,7 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
         pthread_mutex_unlock(&ctx->lock);
 
         if (quic_engine_send_to_connection(ctx->quic_engine, &packet) != 0) {
-            return send_json_response(fd, "error", "quic_send_failed", "connection-not-found");
+            return send_json_response(io, "error", "quic_send_failed", "connection-not-found");
         }
 
         char detail[128];
@@ -1134,17 +952,17 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
                  sizeof(detail),
                  "sent-pn-%u",
                  packet.packet_number);
-        return send_json_response(fd, "quic_send", "ok", detail);
+        return send_json_response(io, "quic_send", "ok", detail);
     }
 
     if (cmd.type == WS_CMD_LIST_VIDEOS) {
         if (!ctx || !ctx->db) {
-            return send_json_response(fd, "error", "unavailable", "db-missing");
+            return send_json_response(io, "error", "unavailable", "db-missing");
         }
         sqlite3_stmt *stmt = NULL;
         const char *sql = "SELECT id, title, IFNULL(thumbnail_path,''), IFNULL(duration,0) FROM videos ORDER BY id DESC LIMIT 20;";
         if (sqlite3_prepare_v2(ctx->db->conn, sql, -1, &stmt, NULL) != SQLITE_OK) {
-            return send_json_response(fd, "error", "db_error", "list-failed");
+            return send_json_response(io, "error", "db_error", "list-failed");
         }
         char buf[4096];
         size_t pos = 0;
@@ -1172,25 +990,25 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
         }
         sqlite3_finalize(stmt);
         if (pos >= sizeof(buf) - 2) {
-            return send_json_response(fd, "error", "internal_error", "response-too-large");
+            return send_json_response(io, "error", "internal_error", "response-too-large");
         }
         pos += (size_t)snprintf(buf + pos, sizeof(buf) - pos, "]}");
-        return ws_send_frame(fd, 0x1, (const uint8_t *)buf, pos);
+        return ws_send_frame(io, 0x1, (const uint8_t *)buf, pos);
     }
 
     if (cmd.type == WS_CMD_LIST_CONTINUE) {
         if (!ctx || !ctx->db) {
-            return send_json_response(fd, "error", "unavailable", "db-missing");
+            return send_json_response(io, "error", "unavailable", "db-missing");
         }
         if (user_id <= 0) {
-            return send_json_response(fd, "error", "unauthorized", "login-required");
+            return send_json_response(io, "error", "unauthorized", "login-required");
         }
         sqlite3_stmt *stmt = NULL;
         const char *sql = "SELECT v.id, v.title, IFNULL(v.thumbnail_path,''), IFNULL(v.duration,0), w.last_position "
                           "FROM watch_history w JOIN videos v ON w.video_id = v.id "
                           "WHERE w.user_id = ? AND w.last_position > 10 ORDER BY w.updated_at DESC LIMIT 10;";
         if (sqlite3_prepare_v2(ctx->db->conn, sql, -1, &stmt, NULL) != SQLITE_OK) {
-            return send_json_response(fd, "error", "db_error", "list-continue-failed");
+            return send_json_response(io, "error", "db_error", "list-continue-failed");
         }
         sqlite3_bind_int(stmt, 1, user_id);
         
@@ -1222,28 +1040,28 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
         }
         sqlite3_finalize(stmt);
         if (pos >= sizeof(buf) - 2) {
-            return send_json_response(fd, "error", "internal_error", "response-too-large");
+            return send_json_response(io, "error", "internal_error", "response-too-large");
         }
         pos += (size_t)snprintf(buf + pos, sizeof(buf) - pos, "]}");
-        return ws_send_frame(fd, 0x1, (const uint8_t *)buf, pos);
+        return ws_send_frame(io, 0x1, (const uint8_t *)buf, pos);
     }
 
     if (cmd.type == WS_CMD_VIDEO_DETAIL) {
         if (!ctx || !ctx->db) {
-            return send_json_response(fd, "error", "unavailable", "db-missing");
+            return send_json_response(io, "error", "unavailable", "db-missing");
         }
         const char *sql =
             "SELECT id, title, IFNULL(description,''), file_path, IFNULL(thumbnail_path,''), "
             "IFNULL(duration,0), IFNULL(upload_date,'') FROM videos WHERE id = ?;";
         sqlite3_stmt *stmt = NULL;
         if (sqlite3_prepare_v2(ctx->db->conn, sql, -1, &stmt, NULL) != SQLITE_OK) {
-            return send_json_response(fd, "error", "db_error", "detail-prepare-failed");
+            return send_json_response(io, "error", "db_error", "detail-prepare-failed");
         }
         sqlite3_bind_int(stmt, 1, cmd.video_id);
         int rc = sqlite3_step(stmt);
         if (rc != SQLITE_ROW) {
             sqlite3_finalize(stmt);
-            return send_json_response(fd, "error", "not_found", "video-not-found");
+            return send_json_response(io, "error", "not_found", "video-not-found");
         }
         const unsigned char *title = sqlite3_column_text(stmt, 1);
         const unsigned char *desc = sqlite3_column_text(stmt, 2);
@@ -1265,18 +1083,18 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
                            upload ? (const char *)upload : "");
         sqlite3_finalize(stmt);
         if (len <= 0 || len >= (int)sizeof(buf)) {
-            return send_json_response(fd, "error", "internal_error", "response-too-large");
+            return send_json_response(io, "error", "internal_error", "response-too-large");
         }
-        return ws_send_frame(fd, 0x1, (const uint8_t *)buf, (size_t)len);
+        return ws_send_frame(io, 0x1, (const uint8_t *)buf, (size_t)len);
     }
 
     if (cmd.type == WS_CMD_STREAM_START) {
         if (!ctx || !ctx->db) {
-            return send_json_response(fd, "error", "unavailable", "db-missing");
+            return send_json_response(io, "error", "unavailable", "db-missing");
         }
         db_video_t video;
         if (db_get_video_by_id(ctx->db, cmd.video_id, &video) != SQLITE_OK) {
-            return send_json_response(fd, "error", "not_found", "video-not-found");
+            return send_json_response(io, "error", "not_found", "video-not-found");
         }
         char full_path[512];
         if (video.file_path[0] == '/') {
@@ -1286,7 +1104,7 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
         }
         struct stat st;
         if (stat(full_path, &st) != 0) {
-            return send_json_response(fd, "error", "not_found", "file-missing");
+            return send_json_response(io, "error", "not_found", "file-missing");
         }
         double duration_sec = 0.0;
         video_probe_duration(full_path, &duration_sec);
@@ -1303,18 +1121,18 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
                            (unsigned long long)cmd.connection_id,
                            cmd.stream_id);
         if (len <= 0 || len >= (int)sizeof(resp)) {
-            return send_json_response(fd, "error", "internal_error", "response-too-large");
+            return send_json_response(io, "error", "internal_error", "response-too-large");
         }
-        return ws_send_frame(fd, 0x1, (const uint8_t *)resp, (size_t)len);
+        return ws_send_frame(io, 0x1, (const uint8_t *)resp, (size_t)len);
     }
 
     if (cmd.type == WS_CMD_STREAM_CHUNK) {
         if (!ctx || !ctx->db) {
-            return send_json_response(fd, "error", "unavailable", "db-missing");
+            return send_json_response(io, "error", "unavailable", "db-missing");
         }
         db_video_t video;
         if (db_get_video_by_id(ctx->db, cmd.video_id, &video) != SQLITE_OK) {
-            return send_json_response(fd, "error", "not_found", "video-not-found");
+            return send_json_response(io, "error", "not_found", "video-not-found");
         }
         char full_path[512];
         if (video.file_path[0] == '/') {
@@ -1333,7 +1151,7 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
                              cmd.offset,
                              cmd.length,
                              &next_pn) != 0) {
-            return send_json_response(fd, "error", "stream_failed", "chunk-send-failed");
+            return send_json_response(io, "error", "stream_failed", "chunk-send-failed");
         }
         pthread_mutex_lock(&ctx->lock);
         ctx->next_packet_number = next_pn;
@@ -1346,17 +1164,17 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
                            cmd.offset,
                            cmd.length);
         if (len <= 0 || len >= (int)sizeof(resp)) {
-            return send_json_response(fd, "error", "internal_error", "response-too-large");
+            return send_json_response(io, "error", "internal_error", "response-too-large");
         }
-        return ws_send_frame(fd, 0x1, (const uint8_t *)resp, (size_t)len);
+        return ws_send_frame(io, 0x1, (const uint8_t *)resp, (size_t)len);
     }
 
     if (cmd.type == WS_CMD_WS_INIT) {
         char path[512];
         snprintf(path, sizeof(path), "data/segments/%d/init-stream0.m4s", cmd.video_id);
-        if (send_ws_file(fd, path, "INIT", 0) != 0) {
+        if (send_ws_file(io, path, "INIT", 0) != 0) {
             fprintf(stderr, "[ws] init segment missing video=%d path=%s\n", cmd.video_id, path);
-            return send_json_response(fd, "ws_segment", "error", "init-missing");
+            return send_json_response(io, "ws_segment", "error", "init-missing");
         }
         
         // Try to read segment_info.json first
@@ -1395,7 +1213,7 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
                     if (resp) {
                         int len = snprintf(resp, resp_size, "{\"type\":\"ws_init\",\"status\":\"ok\",%s", content_start);
                         if (len > 0 && (size_t)len < resp_size) {
-                            int rc = ws_send_frame(fd, 0x1, (const uint8_t *)resp, (size_t)len);
+                            int rc = ws_send_frame(io, 0x1, (const uint8_t *)resp, (size_t)len);
                             free(resp);
                             free(file_content);
                             return rc;
@@ -1435,9 +1253,9 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
             "{\"type\":\"ws_init\",\"status\":\"ok\",\"duration\":%d,\"total_segments\":%d}",
             duration, total_segments);
         if (len > 0 && len < (int)sizeof(resp)) {
-            return ws_send_frame(fd, 0x1, (const uint8_t *)resp, (size_t)len);
+            return ws_send_frame(io, 0x1, (const uint8_t *)resp, (size_t)len);
         }
-        return send_json_response(fd, "ws_init", "ok", "init-sent");
+        return send_json_response(io, "ws_init", "ok", "init-sent");
     }
 
     if (cmd.type == WS_CMD_WS_SEGMENT) {
@@ -1446,7 +1264,7 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
         int retries = 0;
         int send_rc = -1;
         while (retries < 2) {
-            send_rc = send_ws_file(fd, path, "SEGM", (uint32_t)cmd.segment_index);
+            send_rc = send_ws_file(io, path, "SEGM", (uint32_t)cmd.segment_index);
             if (send_rc == 0) {
                 break;
             }
@@ -1465,28 +1283,28 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
                                "{\"type\":\"ws_segment\",\"status\":\"error\",\"segment\":%d,\"message\":\"segment-missing\"}",
                                cmd.segment_index);
             if (len > 0 && len < (int)sizeof(payload)) {
-                return ws_send_frame(fd, 0x1, (const uint8_t *)payload, (size_t)len);
+                return ws_send_frame(io, 0x1, (const uint8_t *)payload, (size_t)len);
             }
-            return send_json_response(fd, "ws_segment", "error", "segment-missing");
+            return send_json_response(io, "ws_segment", "error", "segment-missing");
         }
         if (ctx) {
             pthread_mutex_lock(&ctx->lock);
             ctx->segment_sent_ok++;
             pthread_mutex_unlock(&ctx->lock);
         }
-        return send_json_response(fd, "ws_segment", "ok", "segment-sent");
+        return send_json_response(io, "ws_segment", "ok", "segment-sent");
     }
 
     if (cmd.type == WS_CMD_WATCH_GET) {
         if (!ctx || !ctx->db) {
-            return send_json_response(fd, "error", "unavailable", "db-missing");
+            return send_json_response(io, "error", "unavailable", "db-missing");
         }
         db_watch_history_t hist;
         if (user_id <= 0) {
-            return send_json_response(fd, "error", "unauthorized", "login-required");
+            return send_json_response(io, "error", "unauthorized", "login-required");
         }
         if (db_get_watch_history(ctx->db, user_id, cmd.video_id, &hist) != SQLITE_OK) {
-            return send_json_response(fd, "watch_get", "not_found", "history-missing");
+            return send_json_response(io, "watch_get", "not_found", "history-missing");
         }
         char resp[256];
         int len = snprintf(resp,
@@ -1496,20 +1314,20 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
                            cmd.video_id,
                            hist.last_position);
         if (len <= 0 || len >= (int)sizeof(resp)) {
-            return send_json_response(fd, "error", "internal_error", "response-too-large");
+            return send_json_response(io, "error", "internal_error", "response-too-large");
         }
-        return ws_send_frame(fd, 0x1, (const uint8_t *)resp, (size_t)len);
+        return ws_send_frame(io, 0x1, (const uint8_t *)resp, (size_t)len);
     }
 
     if (cmd.type == WS_CMD_WATCH_UPDATE) {
         if (!ctx || !ctx->db) {
-            return send_json_response(fd, "error", "unavailable", "db-missing");
+            return send_json_response(io, "error", "unavailable", "db-missing");
         }
         if (user_id <= 0) {
-            return send_json_response(fd, "error", "unauthorized", "login-required");
+            return send_json_response(io, "error", "unauthorized", "login-required");
         }
         if (db_upsert_watch_history(ctx->db, user_id, cmd.video_id, cmd.position) != SQLITE_OK) {
-            return send_json_response(fd, "error", "db_error", "watch-update-failed");
+            return send_json_response(io, "error", "db_error", "watch-update-failed");
         }
         char resp[128];
         int len = snprintf(resp,
@@ -1518,12 +1336,12 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
                            user_id,
                            cmd.position);
         if (len <= 0 || len >= (int)sizeof(resp)) {
-            return send_json_response(fd, "error", "internal_error", "response-too-large");
+            return send_json_response(io, "error", "internal_error", "response-too-large");
         }
-        return ws_send_frame(fd, 0x1, (const uint8_t *)resp, (size_t)len);
+        return ws_send_frame(io, 0x1, (const uint8_t *)resp, (size_t)len);
     }
 
-    return send_json_response(fd, "error", "bad_request", "unsupported");
+    return send_json_response(io, "error", "bad_request", "unsupported");
 }
 
 typedef struct {

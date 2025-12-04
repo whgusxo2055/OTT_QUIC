@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 static void copy_column_text(sqlite3_stmt *stmt, int column, char *dest, size_t dest_size) {
     if (!dest || dest_size == 0) {
@@ -26,6 +27,37 @@ static int exec_sql(sqlite3 *db, const char *sql) {
         sqlite3_free(errmsg);
     }
     return rc;
+}
+
+static int ensure_users_role_column(sqlite3 *db) {
+    const char *pragma_sql = "PRAGMA table_info(users);";
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, pragma_sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        return rc;
+    }
+
+    int has_role = 0;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        const unsigned char *name = sqlite3_column_text(stmt, 1);
+        if (name && strcasecmp((const char *)name, "role") == 0) {
+            has_role = 1;
+            break;
+        }
+    }
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
+        return rc;
+    }
+
+    if (has_role) {
+        return SQLITE_OK;
+    }
+
+    const char *alter_sql =
+        "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user' "
+        "CHECK(role IN ('user','admin'));";
+    return exec_sql(db, alter_sql);
 }
 
 int db_init(db_context_t *ctx, const char *db_path) {
@@ -65,6 +97,7 @@ int db_initialize_schema(db_context_t *ctx) {
         " username TEXT NOT NULL UNIQUE,"
         " nickname TEXT NOT NULL,"
         " password_hash TEXT NOT NULL,"
+        " role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('user','admin')),"
         " created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
         ");"
         "CREATE TABLE IF NOT EXISTS sessions ("
@@ -96,7 +129,11 @@ int db_initialize_schema(db_context_t *ctx) {
         " FOREIGN KEY(video_id) REFERENCES videos(id) ON DELETE CASCADE"
         ");";
 
-    return exec_sql(ctx->conn, schema_sql);
+    int rc = exec_sql(ctx->conn, schema_sql);
+    if (rc != SQLITE_OK) {
+        return rc;
+    }
+    return ensure_users_role_column(ctx->conn);
 }
 
 static int bind_optional_text(sqlite3_stmt *stmt, int idx, const char *text) {
@@ -110,13 +147,16 @@ int db_create_user(db_context_t *ctx,
                    const char *username,
                    const char *nickname,
                    const char *password_hash,
+                   const char *role,
                    int *out_user_id) {
     if (!ctx || !ctx->conn || !username || !nickname || !password_hash) {
         return SQLITE_MISUSE;
     }
 
+    const char *role_value = (role && *role) ? role : "user";
+
     const char *sql =
-        "INSERT INTO users (username, nickname, password_hash) VALUES (?, ?, ?);";
+        "INSERT INTO users (username, nickname, password_hash, role) VALUES (?, ?, ?, ?);";
 
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(ctx->conn, sql, -1, &stmt, NULL);
@@ -127,6 +167,7 @@ int db_create_user(db_context_t *ctx,
     sqlite3_bind_text(stmt, 1, username, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 2, nickname, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 3, password_hash, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, role_value, -1, SQLITE_TRANSIENT);
 
     rc = sqlite3_step(stmt);
     if (rc == SQLITE_DONE) {
@@ -146,7 +187,7 @@ int db_get_user_by_username(db_context_t *ctx, const char *username, db_user_t *
     }
 
     const char *sql =
-        "SELECT id, username, nickname, password_hash, IFNULL(created_at, '')"
+        "SELECT id, username, nickname, password_hash, role, IFNULL(created_at, '')"
         " FROM users WHERE username = ?;";
 
     sqlite3_stmt *stmt = NULL;
@@ -164,7 +205,8 @@ int db_get_user_by_username(db_context_t *ctx, const char *username, db_user_t *
         copy_column_text(stmt, 1, out_user->username, sizeof(out_user->username));
         copy_column_text(stmt, 2, out_user->nickname, sizeof(out_user->nickname));
         copy_column_text(stmt, 3, out_user->password_hash, sizeof(out_user->password_hash));
-        copy_column_text(stmt, 4, out_user->created_at, sizeof(out_user->created_at));
+        copy_column_text(stmt, 4, out_user->role, sizeof(out_user->role));
+        copy_column_text(stmt, 5, out_user->created_at, sizeof(out_user->created_at));
         rc = SQLITE_OK;
     } else if (rc == SQLITE_DONE) {
         rc = SQLITE_NOTFOUND;

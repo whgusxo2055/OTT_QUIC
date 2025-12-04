@@ -4,6 +4,10 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
+#ifdef ENABLE_TLS
+#include <openssl/err.h>
+#include <openssl/ssl.h>
+#endif
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,6 +48,7 @@ int server_init(server_ctx_t *ctx, const char *bind_ip, uint16_t port, int max_c
     pthread_mutex_init(&ctx->lock, NULL);
     pthread_cond_init(&ctx->clients_cv, NULL);
     ctx->ws_context = NULL;
+    ctx->ssl_ctx = NULL;
 
     ctx->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (ctx->listen_fd < 0) {
@@ -82,6 +87,44 @@ int server_init(server_ctx_t *ctx, const char *bind_ip, uint16_t port, int max_c
 
     ctx->running = 1;
     return 0;
+}
+
+int server_enable_tls(server_ctx_t *ctx, const char *cert_path, const char *key_path) {
+    if (!ctx || !cert_path || !key_path) {
+        return -1;
+    }
+#ifdef ENABLE_TLS
+    SSL_load_error_strings();
+    OpenSSL_add_ssl_algorithms();
+    ctx->ssl_ctx = SSL_CTX_new(TLS_server_method());
+    if (!ctx->ssl_ctx) {
+        ERR_print_errors_fp(stderr);
+        return -1;
+    }
+    if (SSL_CTX_use_certificate_file(ctx->ssl_ctx, cert_path, SSL_FILETYPE_PEM) != 1) {
+        ERR_print_errors_fp(stderr);
+        SSL_CTX_free(ctx->ssl_ctx);
+        ctx->ssl_ctx = NULL;
+        return -1;
+    }
+    if (SSL_CTX_use_PrivateKey_file(ctx->ssl_ctx, key_path, SSL_FILETYPE_PEM) != 1) {
+        ERR_print_errors_fp(stderr);
+        SSL_CTX_free(ctx->ssl_ctx);
+        ctx->ssl_ctx = NULL;
+        return -1;
+    }
+    if (SSL_CTX_check_private_key(ctx->ssl_ctx) != 1) {
+        ERR_print_errors_fp(stderr);
+        SSL_CTX_free(ctx->ssl_ctx);
+        ctx->ssl_ctx = NULL;
+        return -1;
+    }
+    return 0;
+#else
+    (void)cert_path;
+    (void)key_path;
+    return -1;
+#endif
 }
 
 int server_start(server_ctx_t *ctx) {
@@ -132,6 +175,12 @@ void server_destroy(server_ctx_t *ctx) {
     server_close_socket(&ctx->listen_fd);
     pthread_mutex_destroy(&ctx->lock);
     pthread_cond_destroy(&ctx->clients_cv);
+#ifdef ENABLE_TLS
+    if (ctx->ssl_ctx) {
+        SSL_CTX_free(ctx->ssl_ctx);
+        ctx->ssl_ctx = NULL;
+    }
+#endif
     memset(ctx, 0, sizeof(*ctx));
 }
 
@@ -213,10 +262,35 @@ static void *client_worker(void *arg) {
     client_task_t *task = (client_task_t *)arg;
     server_ctx_t *ctx = task->ctx;
     int client_fd = task->client_fd;
+    SSL *ssl = NULL;
+#ifdef ENABLE_TLS
+    if (ctx->ssl_ctx) {
+        ssl = SSL_new(ctx->ssl_ctx);
+        if (!ssl) {
+            close(client_fd);
+            goto done;
+        }
+        SSL_set_fd(ssl, client_fd);
+        if (SSL_accept(ssl) != 1) {
+            ERR_print_errors_fp(stderr);
+            SSL_free(ssl);
+            ssl = NULL;
+            close(client_fd);
+            goto done;
+        }
+    }
+#else
+#endif
     free(task);
 
-    websocket_handle_client(client_fd, ctx->ws_context);
+    websocket_handle_client(client_fd, ssl, ctx->ws_context);
 
+#ifdef ENABLE_TLS
+    if (ssl) {
+        SSL_shutdown(ssl);
+        SSL_free(ssl);
+    }
+#endif
     pthread_mutex_lock(&ctx->lock);
     if (ctx->client_count > 0) {
         ctx->client_count--;
@@ -224,5 +298,8 @@ static void *client_worker(void *arg) {
     pthread_cond_signal(&ctx->clients_cv);
     pthread_mutex_unlock(&ctx->lock);
 
+#ifdef ENABLE_TLS
+done:
+#endif
     return NULL;
 }

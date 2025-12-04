@@ -5,6 +5,7 @@
 
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -53,7 +54,7 @@ int main(void) {
     }
     db_initialized = 1;
 
-    if (quic_engine_init(&quic_engine, 8443, quic_default_handler, NULL) != 0) {
+    if (quic_engine_init(&quic_engine, 9443, quic_default_handler, NULL) != 0) {
         fputs("Failed to initialize QUIC engine.\n", stderr);
         exit_code = 1;
         goto cleanup;
@@ -70,12 +71,25 @@ int main(void) {
     websocket_context_init(&ws_context, &quic_engine, &db);
     ws_initialized = 1;
 
-    if (server_init(&server, "0.0.0.0", 8080, 5) != 0) {
+    if (server_init(&server, "0.0.0.0", 8443, 5) != 0) {
         fputs("Failed to initialize server context.\n", stderr);
         exit_code = 1;
         goto cleanup;
     }
     server_initialized = 1;
+
+    const char *tls_cert = getenv("TLS_CERT_PATH");
+    const char *tls_key = getenv("TLS_KEY_PATH");
+    if (tls_cert && tls_key) {
+        if (server_enable_tls(&server, tls_cert, tls_key) != 0) {
+            fputs("Warning: failed to enable TLS with provided cert/key. Continuing without TLS.\n", stderr);
+        } else {
+            puts("TLS enabled for HTTPS/WSS.");
+        }
+    } else {
+        puts("TLS_CERT_PATH/TLS_KEY_PATH not set; running without TLS (dev only).");
+    }
+
     server_set_websocket_context(&server, &ws_context);
 
     if (server_start(&server) != 0) {
@@ -85,7 +99,7 @@ int main(void) {
     }
     server_started = 1;
 
-    puts("Server is running on TCP:0.0.0.0:8080 and UDP:0.0.0.0:8443.");
+    puts("Server is running on TCP:0.0.0.0:8443 (HTTPS/WSS) and UDP:0.0.0.0:9443 (QUIC).");
 
     while (keep_running) {
         sleep(1);

@@ -5,6 +5,13 @@
 #include <pthread.h>
 #include <stdint.h>
 
+#ifdef ENABLE_TLS
+#include <openssl/ssl.h>
+#else
+typedef struct ssl_st SSL;
+typedef struct ssl_ctx_st SSL_CTX;
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -23,9 +30,11 @@ typedef struct server_ctx {
     uint16_t port;
     char bind_ip[INET_ADDRSTRLEN];
     websocket_context_t *ws_context;
+    SSL_CTX *ssl_ctx;
 } server_ctx_t;
 
 int server_init(server_ctx_t *ctx, const char *bind_ip, uint16_t port, int max_clients);
+int server_enable_tls(server_ctx_t *ctx, const char *cert_path, const char *key_path);
 int server_start(server_ctx_t *ctx);
 void server_request_stop(server_ctx_t *ctx);
 void server_join(server_ctx_t *ctx);

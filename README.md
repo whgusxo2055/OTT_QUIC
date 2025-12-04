@@ -29,6 +29,8 @@ ott_quic/
 make        # build/ott_server 생성
 ./build/ott_server
 make test   # DB/서버/WebSocket 단위 테스트 실행
+# OpenSSL 헤더/라이브러리 설치 시 TLS 내장 빌드는 TLS=1 플래그로 실행하세요.
+# 예: make TLS=1
 ```
 
 ## Docker 사용
@@ -44,3 +46,4 @@ docker-compose down
 - C 표준: C11
 - 추후 모듈은 `src/server`, `src/auth`, `src/db`, `src/utils` 하위에 추가합니다.
 - 데이터 파일은 `data/` 디렉터리에 저장되며 Git에서 제외됩니다.
+- 기본 포트: TCP 8443(HTTPS/WSS), UDP 9443(QUIC). 필요 시 `PORT` 환경변수 또는 소스 수정으로 조정하세요.
