@@ -118,7 +118,10 @@ static int quic_engine_process_packet(quic_engine_t *engine,
             *state_addr = *addr;
         }
     } else {
-        entry->addr = *addr;
+        if (memcmp(&entry->addr, addr, sizeof(*addr)) != 0) {
+            entry->addr = *addr;
+            engine->metrics.connections_migrated++;
+        }
         entry->last_seen = now;
     }
 

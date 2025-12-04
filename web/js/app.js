@@ -12,7 +12,7 @@ let sourceBuffer = null;
 let segmentQueue = [];
 let appending = false;
 let nextSegment = 0;
-const maxSegments = 10;
+const maxSegments = 100;
 let watchTimer = null;
 let watchTimer = null;
 
@@ -201,6 +201,12 @@ function handleMessage(msg) {
         updateMeta();
         if (watchTimer) clearInterval(watchTimer);
         watchTimer = setInterval(saveWatch, 10000);
+      }
+      log(JSON.stringify(msg));
+      break;
+    case 'ws_segment':
+      if (msg.status === 'error') {
+        showToast(msg.message || 'segment error');
       }
       log(JSON.stringify(msg));
       break;

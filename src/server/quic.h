@@ -63,6 +63,7 @@ typedef struct {
     uint64_t packets_sent;
     uint64_t connections_opened;
     uint64_t connections_closed;
+    uint64_t connections_migrated;
 } quic_metrics_t;
 
 typedef struct {
