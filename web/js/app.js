@@ -14,6 +14,7 @@ let appending = false;
 let nextSegment = 0;
 const maxSegments = 10;
 let watchTimer = null;
+let watchTimer = null;
 
 function log(msg) {
   const el = document.getElementById('log');
@@ -307,6 +308,12 @@ function requestSegment() {
     video_id: currentVideo,
     segment: nextSegment,
   });
+}
+
+function saveWatch() {
+  const pos = parseInt(document.getElementById('seek-offset').value, 10) || 0;
+  if (!currentVideo) return;
+  send({type: 'watch_update', video_id: currentVideo, position: pos});
 }
 
 function saveWatch() {

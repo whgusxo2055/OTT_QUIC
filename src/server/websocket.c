@@ -263,7 +263,7 @@ int websocket_handle_client(int client_fd, websocket_context_t *ctx) {
     if (ctx && ctx->db) {
         char sid[SESSION_ID_LEN + 1];
         if (session_extract_from_headers(&request, sid, sizeof(sid)) == 0) {
-            session_validate_and_extend(ctx->db, sid, SESSION_TTL_SECONDS, NULL);
+            session_validate_and_extend(ctx->db, sid, SESSION_TTL_SECONDS, &current_user_id);
         }
     }
 
@@ -1120,18 +1120,17 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
             return send_json_response(fd, "error", "unavailable", "db-missing");
         }
         db_watch_history_t hist;
-        int uid = user_id > 0 ? user_id : 0;
-        if (uid == 0) {
+        if (user_id <= 0) {
             return send_json_response(fd, "error", "unauthorized", "login-required");
         }
-        if (db_get_watch_history(ctx->db, uid, cmd.video_id, &hist) != SQLITE_OK) {
+        if (db_get_watch_history(ctx->db, user_id, cmd.video_id, &hist) != SQLITE_OK) {
             return send_json_response(fd, "watch_get", "not_found", "history-missing");
         }
         char resp[256];
         int len = snprintf(resp,
                            sizeof(resp),
                            "{\"type\":\"watch_get\",\"status\":\"ok\",\"user_id\":%d,\"video_id\":%d,\"position\":%d}",
-                           uid,
+                           user_id,
                            cmd.video_id,
                            hist.last_position);
         if (len <= 0 || len >= (int)sizeof(resp)) {
@@ -1144,18 +1143,17 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
         if (!ctx || !ctx->db) {
             return send_json_response(fd, "error", "unavailable", "db-missing");
         }
-        int uid = user_id > 0 ? user_id : 0;
-        if (uid == 0) {
+        if (user_id <= 0) {
             return send_json_response(fd, "error", "unauthorized", "login-required");
         }
-        if (db_upsert_watch_history(ctx->db, uid, cmd.video_id, cmd.position) != SQLITE_OK) {
+        if (db_upsert_watch_history(ctx->db, user_id, cmd.video_id, cmd.position) != SQLITE_OK) {
             return send_json_response(fd, "error", "db_error", "watch-update-failed");
         }
         char resp[128];
         int len = snprintf(resp,
                            sizeof(resp),
                            "{\"type\":\"watch_update\",\"status\":\"ok\",\"user_id\":%d,\"position\":%d}",
-                           uid,
+                           user_id,
                            cmd.position);
         if (len <= 0 || len >= (int)sizeof(resp)) {
             return send_json_response(fd, "error", "internal_error", "response-too-large");
