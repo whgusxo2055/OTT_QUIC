@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <time.h>
 
 static int ensure_dir(const char *path) {
     if (access(path, F_OK) == 0) {
@@ -37,7 +38,7 @@ int handle_upload_request(int fd, const char *headers, const char *body, size_t 
 
     int video_id = 0;
     char base_name[64];
-    snprintf(base_name, sizeof(base_name), "video_%ld", time(NULL));
+    snprintf(base_name, sizeof(base_name), "video_%ld", (long)time(NULL));
 
     char video_path[256];
     snprintf(video_path, sizeof(video_path), "data/videos/%s.mp4", base_name);
