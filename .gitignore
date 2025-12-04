@@ -24,3 +24,6 @@
 # Docker
 *.pid
 data/
+
+# Certificates
+certs/
