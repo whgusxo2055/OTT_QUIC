@@ -5,6 +5,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <stdint.h>
 #include <unistd.h>
 
 static int read_random(uint8_t *buf, size_t len) {

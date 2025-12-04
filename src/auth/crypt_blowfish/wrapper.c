@@ -16,11 +16,22 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include <errno.h>
 #ifndef __set_errno
 #define __set_errno(val) errno = (val)
 #endif
+
+static char *bf_strdup(const char *s)
+{
+	size_t len = strlen(s) + 1;
+	char *p = (char *)malloc(len);
+	if (!p)
+		return NULL;
+	memcpy(p, s, len);
+	return p;
+}
 
 #ifdef TEST
 #include <stdio.h>
@@ -243,7 +254,7 @@ char *__crypt_gensalt_ra(const char *prefix, unsigned long count,
 		input, size, output, sizeof(output));
 
 	if (retval) {
-		retval = strdup(retval);
+		retval = bf_strdup(retval);
 #ifndef __GLIBC__
 		/* strdup(3) on glibc sets errno, so we don't need to bother */
 		if (!retval)

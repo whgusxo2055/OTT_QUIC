@@ -42,6 +42,7 @@ typedef struct {
     char description[DB_MAX_DESCRIPTION];
     char file_path[DB_MAX_PATH];
     char thumbnail_path[DB_MAX_THUMBNAIL];
+    char segment_path[DB_MAX_PATH];
     int duration;
     char upload_date[DB_MAX_TIMESTAMP];
 } db_video_t;
@@ -71,10 +72,12 @@ int db_create_video(db_context_t *ctx,
                     const char *description,
                     const char *file_path,
                     const char *thumbnail_path,
+                    const char *segment_path,
                     int duration,
                     int *out_video_id);
 int db_get_video_by_id(db_context_t *ctx, int video_id, db_video_t *out_video);
 int db_delete_video_by_id(db_context_t *ctx, int video_id);
+int db_update_video_segment_path(db_context_t *ctx, int video_id, const char *segment_path);
 
 int db_upsert_watch_history(db_context_t *ctx, int user_id, int video_id, int last_position);
 int db_get_watch_history(db_context_t *ctx, int user_id, int video_id, db_watch_history_t *out_history);

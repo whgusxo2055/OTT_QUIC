@@ -17,6 +17,8 @@ typedef struct websocket_context {
     db_context_t *db; /* optional */
     pthread_mutex_t lock;
     uint32_t next_packet_number;
+    uint64_t segment_sent_ok;
+    uint64_t segment_sent_fail;
 } websocket_context_t;
 
 void websocket_context_init(websocket_context_t *ctx, quic_engine_t *engine, db_context_t *db);

@@ -146,6 +146,8 @@ void websocket_context_init(websocket_context_t *ctx, quic_engine_t *engine, db_
     ctx->db = db;
     pthread_mutex_init(&ctx->lock, NULL);
     ctx->next_packet_number = 1;
+    ctx->segment_sent_ok = 0;
+    ctx->segment_sent_fail = 0;
 }
 
 void websocket_context_destroy(websocket_context_t *ctx) {
@@ -1137,19 +1139,54 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
     }
 
     if (cmd.type == WS_CMD_WS_INIT) {
+        if (user_id <= 0) {
+            return send_json_response(fd, "ws_init", "unauthorized", "login-required");
+        }
         char path[512];
         snprintf(path, sizeof(path), "data/segments/%d/init-stream0.m4s", cmd.video_id);
         if (send_ws_file(fd, path, "INIT", 0) != 0) {
-            return send_json_response(fd, "error", "not_found", "init-missing");
+            fprintf(stderr, "[ws] init segment missing video=%d path=%s\n", cmd.video_id, path);
+            return send_json_response(fd, "ws_segment", "error", "init-missing");
         }
         return send_json_response(fd, "ws_init", "ok", "init-sent");
     }
 
     if (cmd.type == WS_CMD_WS_SEGMENT) {
+        if (user_id <= 0) {
+            return send_json_response(fd, "ws_segment", "unauthorized", "login-required");
+        }
         char path[512];
         snprintf(path, sizeof(path), "data/segments/%d/chunk-stream0-%05d.m4s", cmd.video_id, cmd.segment_index);
-        if (send_ws_file(fd, path, "SEGM", (uint32_t)cmd.segment_index) != 0) {
-            return send_json_response(fd, "error", "not_found", "segment-missing");
+        int retries = 0;
+        int send_rc = -1;
+        while (retries < 2) {
+            send_rc = send_ws_file(fd, path, "SEGM", (uint32_t)cmd.segment_index);
+            if (send_rc == 0) {
+                break;
+            }
+            retries++;
+        }
+        if (send_rc != 0) {
+            fprintf(stderr, "[ws] segment missing/fail video=%d seg=%d path=%s retries=%d\n", cmd.video_id, cmd.segment_index, path, retries);
+            if (ctx) {
+                pthread_mutex_lock(&ctx->lock);
+                ctx->segment_sent_fail++;
+                pthread_mutex_unlock(&ctx->lock);
+            }
+            char payload[160];
+            int len = snprintf(payload,
+                               sizeof(payload),
+                               "{\"type\":\"ws_segment\",\"status\":\"error\",\"segment\":%d,\"message\":\"segment-missing\"}",
+                               cmd.segment_index);
+            if (len > 0 && len < (int)sizeof(payload)) {
+                return ws_send_frame(fd, 0x1, (const uint8_t *)payload, (size_t)len);
+            }
+            return send_json_response(fd, "ws_segment", "error", "segment-missing");
+        }
+        if (ctx) {
+            pthread_mutex_lock(&ctx->lock);
+            ctx->segment_sent_ok++;
+            pthread_mutex_unlock(&ctx->lock);
         }
         return send_json_response(fd, "ws_segment", "ok", "segment-sent");
     }

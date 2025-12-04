@@ -9,3 +9,14 @@ services:
       - ./data:/app/data
       - ./web:/app/web:ro
     command: ["./build/ott_server"]
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8080
+  static_web:
+    image: nginx:alpine
+    container_name: ott_quic_static
+    ports:
+      - "8081:80"
+    volumes:
+      - ./web:/usr/share/nginx/html:ro
+    restart: unless-stopped

@@ -2,13 +2,17 @@
 <html lang="ko">
 <head>
   <meta charset="UTF-8">
-  <title>OTT_QUIC Player</title>
+  <title>OTT_QUIC</title>
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-  <div class="container">
-    <header>
-      <h1>OTT_QUIC Player</h1>
+  <div class="page">
+    <header class="nav">
+      <div class="brand">OTT_QUIC</div>
+      <div class="search">
+        <input id="search-input" type="search" placeholder="제목 검색">
+        <button id="refresh-btn">새로고침</button>
+      </div>
       <div class="auth">
         <input id="username" placeholder="username">
         <input id="password" type="password" placeholder="password">
@@ -17,47 +21,90 @@
         <span id="session-info" class="pill"></span>
       </div>
     </header>
-    <section class="lists">
-      <div class="panel">
-        <h2>영상 목록</h2>
-        <button id="refresh-btn">새로고침</button>
-        <ul id="video-list"></ul>
-      </div>
-      <div class="panel">
-        <h2>영상 정보</h2>
-        <div id="video-detail" class="detail">
-          <div><strong>제목:</strong> <span id="detail-title">-</span></div>
-          <div><strong>설명:</strong> <span id="detail-desc">-</span></div>
-          <div><strong>재생시간:</strong> <span id="detail-duration">-</span></div>
-          <div><strong>파일:</strong> <span id="detail-file">-</span></div>
-          <div><strong>썸네일:</strong> <span id="detail-thumb">-</span></div>
-        </div>
-        <div class="controls">
-          <label>오프셋(ms): <input id="seek-offset" type="number" value="0"></label>
-          <button id="start-btn">스트림 시작</button>
-          <button id="seek-btn">시크</button>
-          <button id="stop-btn">중단</button>
-        </div>
-        <div class="watch">
-          <label>이어보기 위치(ms): <input id="watch-pos" type="number" value="0"></label>
-          <button id="watch-get-btn">이어보기 조회</button>
-          <button id="watch-set-btn">이어보기 저장</button>
-        </div>
-        <div class="meta">
-          <div><strong>Connection:</strong> <span id="meta-conn">-</span></div>
-          <div><strong>Stream:</strong> <span id="meta-stream">-</span></div>
-          <div><strong>총 바이트:</strong> <span id="meta-bytes">-</span></div>
-          <div><strong>청크 크기:</strong> <span id="meta-chunk">-</span></div>
-        </div>
-        <div class="player">
-          <video id="player" controls></video>
-        </div>
-        <div class="log">
-          <h3>로그</h3>
-          <pre id="log"></pre>
+
+    <section class="hero" id="hero">
+      <div class="hero-bg" id="hero-bg"></div>
+      <div class="hero-overlay"></div>
+      <div class="hero-content">
+        <div class="hero-tag">추천</div>
+        <h1 id="hero-title">영상을 선택해 시작하세요</h1>
+        <p id="hero-desc">업로드 후 자동 세그먼트/썸네일이 생성됩니다.</p>
+        <div class="hero-actions">
+          <button id="start-btn" class="primary">재생</button>
+          <button id="watch-get-btn" class="ghost">이어보기</button>
         </div>
       </div>
     </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2>계속 시청</h2>
+        <div class="section-actions">
+          <button id="watch-set-btn">지금 위치 저장</button>
+        </div>
+      </div>
+      <div class="carousel" id="continue-list"></div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2>전체 영상</h2>
+      </div>
+      <div class="grid" id="video-list"></div>
+    </section>
+
+    <section class="section upload">
+      <div class="section-head">
+        <h2>업로드</h2>
+        <span class="hint">2GB 이하, 자동 세그먼트/썸네일 생성</span>
+      </div>
+      <div class="upload-form">
+        <input type="file" id="upload-file" accept="video/*">
+        <input type="text" id="upload-title" placeholder="제목">
+        <input type="text" id="upload-desc" placeholder="설명">
+        <button id="upload-btn">업로드</button>
+      </div>
+      <div class="upload-status">
+        <div class="progress"><div id="upload-progress"></div></div>
+        <div id="upload-msg"></div>
+      </div>
+    </section>
+
+    <div class="player-drawer hidden" id="player-drawer">
+      <div class="player-header">
+        <div>
+          <div class="eyebrow">현재 재생</div>
+          <div id="detail-title" class="title">-</div>
+          <div id="detail-desc" class="desc">-</div>
+          <div class="meta">
+            <span id="detail-duration">-</span>
+            <span id="detail-file">-</span>
+          </div>
+        </div>
+        <button id="drawer-close">닫기</button>
+      </div>
+      <div class="player-shell">
+        <video id="player" controls></video>
+        <div class="player-status">
+          <span>Conn <b id="meta-conn">-</b></span>
+          <span>Stream <b id="meta-stream">-</b></span>
+          <span>Bytes <b id="meta-bytes">-</b></span>
+          <span>Chunk <b id="meta-chunk">-</b></span>
+        </div>
+        <div class="player-controls">
+          <label>오프셋(ms) <input id="seek-offset" type="number" value="0"></label>
+          <button id="seek-btn">시크</button>
+          <button id="stop-btn">중단</button>
+        </div>
+      </div>
+      <div class="log">
+        <div class="log-head">
+          <h3>로그</h3>
+          <button id="watch-get-inline">이어보기 조회</button>
+        </div>
+        <pre id="log"></pre>
+      </div>
+    </div>
     <div id="toast" class="toast hidden"></div>
   </div>
   <script src="js/app.js"></script>

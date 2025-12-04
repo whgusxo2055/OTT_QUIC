@@ -3,6 +3,7 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <string.h>
 
 int main(void) {
     db_context_t ctx;
@@ -31,15 +32,20 @@ int main(void) {
                          "Example description",
                          "/videos/sample.mp4",
                          "/thumbs/sample.jpg",
+                         NULL,
                          120,
                          &video_id);
     assert(rc == SQLITE_OK);
     assert(video_id > 0);
 
+    rc = db_update_video_segment_path(&ctx, video_id, "/segments/sample");
+    assert(rc == SQLITE_OK);
+
     db_video_t video;
     rc = db_get_video_by_id(&ctx, video_id, &video);
     assert(rc == SQLITE_OK);
     assert(video.id == video_id);
+    assert(strcmp(video.segment_path, "/segments/sample") == 0);
 
     rc = db_upsert_watch_history(&ctx, user_id, video_id, 42);
     assert(rc == SQLITE_OK);

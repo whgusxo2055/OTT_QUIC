@@ -81,6 +81,7 @@ int db_initialize_schema(db_context_t *ctx) {
         " description TEXT,"
         " file_path TEXT NOT NULL,"
         " thumbnail_path TEXT,"
+        " segment_path TEXT,"
         " duration INTEGER DEFAULT 0,"
         " upload_date DATETIME DEFAULT CURRENT_TIMESTAMP"
         ");"
@@ -202,6 +203,7 @@ int db_create_video(db_context_t *ctx,
                     const char *description,
                     const char *file_path,
                     const char *thumbnail_path,
+                    const char *segment_path,
                     int duration,
                     int *out_video_id) {
     if (!ctx || !ctx->conn || !title || !file_path) {
@@ -209,8 +211,8 @@ int db_create_video(db_context_t *ctx,
     }
 
     const char *sql =
-        "INSERT INTO videos (title, description, file_path, thumbnail_path, duration)"
-        " VALUES (?, ?, ?, ?, ?);";
+        "INSERT INTO videos (title, description, file_path, thumbnail_path, segment_path, duration)"
+        " VALUES (?, ?, ?, ?, ?, ?);";
 
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(ctx->conn, sql, -1, &stmt, NULL);
@@ -222,7 +224,8 @@ int db_create_video(db_context_t *ctx,
     bind_optional_text(stmt, 2, description);
     sqlite3_bind_text(stmt, 3, file_path, -1, SQLITE_TRANSIENT);
     bind_optional_text(stmt, 4, thumbnail_path);
-    sqlite3_bind_int(stmt, 5, duration);
+    bind_optional_text(stmt, 5, segment_path);
+    sqlite3_bind_int(stmt, 6, duration);
 
     rc = sqlite3_step(stmt);
     if (rc == SQLITE_DONE) {
@@ -243,7 +246,7 @@ int db_get_video_by_id(db_context_t *ctx, int video_id, db_video_t *out_video) {
 
     const char *sql =
         "SELECT id, title, IFNULL(description,''), file_path, IFNULL(thumbnail_path,''),"
-        " IFNULL(duration,0), IFNULL(upload_date,'') FROM videos WHERE id = ?;";
+        " IFNULL(segment_path,''), IFNULL(duration,0), IFNULL(upload_date,'') FROM videos WHERE id = ?;";
 
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(ctx->conn, sql, -1, &stmt, NULL);
@@ -261,8 +264,9 @@ int db_get_video_by_id(db_context_t *ctx, int video_id, db_video_t *out_video) {
         copy_column_text(stmt, 2, out_video->description, sizeof(out_video->description));
         copy_column_text(stmt, 3, out_video->file_path, sizeof(out_video->file_path));
         copy_column_text(stmt, 4, out_video->thumbnail_path, sizeof(out_video->thumbnail_path));
-        out_video->duration = sqlite3_column_int(stmt, 5);
-        copy_column_text(stmt, 6, out_video->upload_date, sizeof(out_video->upload_date));
+        copy_column_text(stmt, 5, out_video->segment_path, sizeof(out_video->segment_path));
+        out_video->duration = sqlite3_column_int(stmt, 6);
+        copy_column_text(stmt, 7, out_video->upload_date, sizeof(out_video->upload_date));
         rc = SQLITE_OK;
     } else if (rc == SQLITE_DONE) {
         rc = SQLITE_NOTFOUND;
@@ -286,6 +290,31 @@ int db_delete_video_by_id(db_context_t *ctx, int video_id) {
     }
 
     sqlite3_bind_int(stmt, 1, video_id);
+
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_DONE) {
+        rc = SQLITE_OK;
+    }
+
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
+int db_update_video_segment_path(db_context_t *ctx, int video_id, const char *segment_path) {
+    if (!ctx || !ctx->conn || !segment_path) {
+        return SQLITE_MISUSE;
+    }
+
+    const char *sql = "UPDATE videos SET segment_path = ? WHERE id = ?;";
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(ctx->conn, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        return rc;
+    }
+
+    sqlite3_bind_text(stmt, 1, segment_path, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 2, video_id);
 
     rc = sqlite3_step(stmt);
     if (rc == SQLITE_DONE) {

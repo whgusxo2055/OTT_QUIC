@@ -121,6 +121,10 @@ static int quic_engine_process_packet(quic_engine_t *engine,
         if (memcmp(&entry->addr, addr, sizeof(*addr)) != 0) {
             entry->addr = *addr;
             engine->metrics.connections_migrated++;
+            if (state_changed && state_addr) {
+                *state_changed = entry->state;
+                *state_addr = *addr;
+            }
         }
         entry->last_seen = now;
     }

@@ -21,6 +21,9 @@ typedef struct {
     uint8_t stream_buf[QUIC_MAX_PAYLOAD];
     size_t stream_len;
     uint32_t stream_offset;
+    quic_connection_state_t last_state;
+    struct sockaddr_in last_state_addr;
+    int state_called;
 } handler_state_t;
 
 static void packet_handler(const quic_packet_t *packet, const struct sockaddr_in *addr, void *user_data) {
@@ -51,6 +54,18 @@ static void stream_handler(uint64_t connection_id, uint32_t stream_id, uint32_t 
     pthread_mutex_unlock(&state->lock);
 }
 
+static void state_handler(uint64_t connection_id, quic_connection_state_t state, const struct sockaddr_in *addr, void *user_data) {
+    (void)connection_id;
+    handler_state_t *st = (handler_state_t *)user_data;
+    pthread_mutex_lock(&st->lock);
+    st->last_state = state;
+    if (addr) {
+        st->last_state_addr = *addr;
+    }
+    st->state_called = 1;
+    pthread_mutex_unlock(&st->lock);
+}
+
 static int wait_for_packet(handler_state_t *state) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
@@ -78,21 +93,33 @@ int main(void) {
     const uint16_t port = 18443;
     assert(quic_engine_init(&engine, port, packet_handler, &state) == 0);
     quic_engine_set_stream_data_handler(&engine, stream_handler, &state);
+    quic_engine_set_state_handler(&engine, state_handler, &state);
     assert(quic_engine_start(&engine) == 0);
 
     int client_fd1 = socket(AF_INET, SOCK_DGRAM, 0);
     assert(client_fd1 >= 0);
     int client_fd2 = socket(AF_INET, SOCK_DGRAM, 0);
     assert(client_fd2 >= 0);
+    int client_fd3 = socket(AF_INET, SOCK_DGRAM, 0);
+    assert(client_fd3 >= 0);
     struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
     assert(setsockopt(client_fd1, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0);
     assert(setsockopt(client_fd2, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0);
+    assert(setsockopt(client_fd3, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0);
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+
+    /* 로컬 포트가 다른 소켓으로 bind하여 migration 테스트 준비 */
+    struct sockaddr_in bind1 = {.sin_family = AF_INET, .sin_port = 0};
+    inet_pton(AF_INET, "127.0.0.1", &bind1.sin_addr);
+    assert(bind(client_fd1, (struct sockaddr *)&bind1, sizeof(bind1)) == 0);
+    struct sockaddr_in bind3 = {.sin_family = AF_INET, .sin_port = 0};
+    inet_pton(AF_INET, "127.0.0.1", &bind3.sin_addr);
+    assert(bind(client_fd3, (struct sockaddr *)&bind3, sizeof(bind3)) == 0);
 
     uint8_t payload[] = {0x10, 0x20, 0x30};
     const uint64_t conn_id1 = 0xABCDEFULL;
@@ -260,6 +287,42 @@ int main(void) {
     quic_engine_get_metrics(&engine, &after_metrics);
     assert(after_metrics.packets_sent - before_metrics.packets_sent >= 2);
 
+    /* 주소 migration: conn_id1을 다른 소켓에서 전송 */
+    struct sockaddr_in src_addr1;
+    socklen_t sa_len1 = sizeof(src_addr1);
+    assert(getsockname(client_fd1, (struct sockaddr *)&src_addr1, &sa_len1) == 0);
+    struct sockaddr_in src_addr3;
+    socklen_t sa_len3 = sizeof(src_addr3);
+    assert(getsockname(client_fd3, (struct sockaddr *)&src_addr3, &sa_len3) == 0);
+    assert(ntohs(src_addr1.sin_port) != ntohs(src_addr3.sin_port));
+
+    quic_packet_t migrate_packet = {
+        .flags = QUIC_FLAG_DATA,
+        .connection_id = conn_id1,
+        .packet_number = 20,
+        .stream_id = 1,
+        .offset = 0,
+        .length = sizeof(payload),
+        .payload = payload,
+    };
+    assert(quic_packet_serialize(&migrate_packet, buffer, sizeof(buffer), &len) == 0);
+    assert(sendto(client_fd3, buffer, len, 0, (struct sockaddr *)&addr, sizeof(addr)) == (ssize_t)len);
+    pthread_mutex_lock(&state.lock);
+    state.received = 0;
+    state.state_called = 0;
+    pthread_mutex_unlock(&state.lock);
+    assert(wait_for_packet(&state) == 0);
+
+    quic_metrics_t after_mig;
+    quic_engine_get_metrics(&engine, &after_mig);
+    assert(after_mig.connections_migrated >= 1);
+    pthread_mutex_lock(&state.lock);
+    int state_called = state.state_called;
+    struct sockaddr_in new_addr = state.last_state_addr;
+    pthread_mutex_unlock(&state.lock);
+    assert(state_called);
+    assert(ntohs(new_addr.sin_port) == ntohs(src_addr3.sin_port));
+
     /* 타임아웃 정리 검증 */
     pthread_mutex_lock(&engine.lock);
     quic_connection_entry_t *entry = NULL;
@@ -281,6 +344,7 @@ int main(void) {
 
     close(client_fd1);
     close(client_fd2);
+    close(client_fd3);
     quic_engine_stop(&engine);
     quic_engine_join(&engine);
     quic_engine_destroy(&engine);
