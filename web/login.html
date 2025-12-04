@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>OTT_QUIC - 로그인</title>
+  <link rel="stylesheet" href="css/style.css">
+  <style>
+    body {
+      background-image: linear-gradient(rgba(0, 0, 0, 0.5), rgba(0, 0, 0, 0.5)), url('https://assets.nflxext.com/ffe/siteui/vlv3/f841d4c7-10e1-40af-bcae-07a3f8dc141a/f6d7434e-d6de-4185-a6d4-c77a2d08737b/KR-ko-20220502-popsignuptwoweeks-perspective_alpha_website_medium.jpg');
+      background-size: cover;
+      background-position: center;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+    }
+    .login-container {
+      background-color: rgba(0, 0, 0, 0.75);
+      padding: 60px 68px 40px;
+      border-radius: 4px;
+      width: 100%;
+      max-width: 450px;
+      min-height: 660px;
+    }
+    .login-title {
+      color: #fff;
+      font-size: 32px;
+      font-weight: 700;
+      margin-bottom: 28px;
+    }
+    .login-form input {
+      background: #333;
+      border-radius: 4px;
+      border: 0;
+      color: #fff;
+      height: 50px;
+      line-height: 50px;
+      padding: 16px 20px;
+      width: 100%;
+      margin-bottom: 16px;
+    }
+    .login-form button {
+      background-color: #e50914;
+      border-radius: 4px;
+      font-size: 16px;
+      font-weight: 700;
+      margin: 24px 0 12px;
+      width: 100%;
+      padding: 16px;
+      color: white;
+      border: none;
+      cursor: pointer;
+    }
+    .login-form button:hover {
+      background-color: #f40612;
+    }
+    .login-help {
+      display: flex;
+      justify-content: space-between;
+      color: #b3b3b3;
+      font-size: 13px;
+    }
+    .login-signup {
+      margin-top: 16px;
+      color: #737373;
+      font-size: 16px;
+    }
+    .login-signup a {
+      color: #fff;
+      text-decoration: none;
+    }
+    .login-signup a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <div class="login-container">
+    <h1 class="login-title">로그인</h1>
+    <div class="login-form">
+      <input type="text" id="username" placeholder="이메일 주소 또는 전화번호">
+      <input type="password" id="password" placeholder="비밀번호">
+      <button id="login-btn" onclick="handleLogin()">로그인</button>
+      <div class="login-help">
+        <div>
+          <input type="checkbox" id="remember-me" style="width: auto; height: auto; margin: 0 5px 0 0;">
+          <label for="remember-me">로그인 정보 저장</label>
+        </div>
+        <a href="#" style="color: #b3b3b3; text-decoration: none;">도움이 필요하신가요?</a>
+      </div>
+    </div>
+    <div class="login-signup">
+      OTT_QUIC 회원이 아니신가요? <a href="#">지금 가입하세요.</a>
+    </div>
+  </div>
+
+  <script>
+    const apiHost = location.hostname || 'localhost';
+    const apiPort = '8080';
+    const apiBase = `${location.protocol}//${apiHost}:${apiPort}`;
+
+    async function handleLogin() {
+      const user = document.getElementById('username').value;
+      const pass = document.getElementById('password').value;
+      
+      try {
+        const res = await fetch(apiBase + '/login', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          credentials: 'include',
+          body: JSON.stringify({username: user, password: pass}),
+        });
+        
+        if (res.ok) {
+          const data = await res.json();
+          // 세션 ID 저장 (localStorage 사용)
+          localStorage.setItem('ott_session_id', data.session_id);
+          localStorage.setItem('ott_username', user);
+          if (data.is_admin) {
+            localStorage.setItem('ott_is_admin', 'true');
+          } else {
+            localStorage.removeItem('ott_is_admin');
+          }
+          window.location.href = 'index.html';
+        } else {
+          alert('로그인 실패: 아이디 또는 비밀번호를 확인하세요.');
+        }
+      } catch (e) {
+        console.error(e);
+        alert('서버 연결 오류');
+      }
+    }
+
+    // 엔터키 로그인 지원
+    document.getElementById('password').addEventListener('keypress', function (e) {
+      if (e.key === 'Enter') {
+        handleLogin();
+      }
+    });
+  </script>
+</body>
+</html>

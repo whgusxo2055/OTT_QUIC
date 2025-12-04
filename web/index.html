@@ -2,111 +2,74 @@
 <html lang="ko">
 <head>
   <meta charset="UTF-8">
-  <title>OTT_QUIC</title>
+  <title>OTT_QUIC - 홈</title>
   <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
 </head>
 <body>
-  <div class="page">
-    <header class="nav">
-      <div class="brand">OTT_QUIC</div>
-      <div class="search">
-        <input id="search-input" type="search" placeholder="제목 검색">
-        <button id="refresh-btn">새로고침</button>
+  <!-- Navigation -->
+  <nav class="nav" id="navbar">
+    <a href="index.html" class="brand">OTT_QUIC</a>
+    <div class="nav-menu">
+      <a href="index.html" class="active">홈</a>
+      <a href="#">시리즈</a>
+      <a href="#">영화</a>
+      <a href="#">NEW! 요즘 대세 콘텐츠</a>
+      <a href="#">내가 찜한 콘텐츠</a>
+    </div>
+    <div class="nav-right">
+      <button class="icon-btn"><i class="fas fa-search"></i></button>
+      <button class="icon-btn"><i class="fas fa-bell"></i></button>
+      <div class="profile-menu" style="display: flex; gap: 10px; align-items: center;">
+        <a id="admin-link" href="admin.html" class="btn btn-secondary" style="padding: 5px 10px; font-size: 0.8rem; display: none;">관리자</a>
+        <button id="logout-btn" class="btn btn-secondary" style="padding: 5px 10px; font-size: 0.8rem;">로그아웃</button>
       </div>
-      <div class="auth">
-        <input id="username" placeholder="username">
-        <input id="password" type="password" placeholder="password">
-        <button id="login-btn">로그인</button>
-        <button id="logout-btn">로그아웃</button>
-        <span id="session-info" class="pill"></span>
-      </div>
-    </header>
+    </div>
+  </nav>
 
-    <section class="hero" id="hero">
-      <div class="hero-bg" id="hero-bg"></div>
-      <div class="hero-overlay"></div>
-      <div class="hero-content">
-        <div class="hero-tag">추천</div>
-        <h1 id="hero-title">영상을 선택해 시작하세요</h1>
-        <p id="hero-desc">업로드 후 자동 세그먼트/썸네일이 생성됩니다.</p>
-        <div class="hero-actions">
-          <button id="start-btn" class="primary">재생</button>
-          <button id="watch-get-btn" class="ghost">이어보기</button>
-        </div>
+  <!-- Hero Section -->
+  <header class="hero" id="hero-section">
+    <div class="hero-overlay"></div>
+    <div class="hero-content">
+      <h1 class="hero-title" id="hero-title">로딩 중...</h1>
+      <p class="hero-desc" id="hero-desc">잠시만 기다려주세요.</p>
+      <div class="hero-actions">
+        <button id="hero-play-btn" class="btn btn-primary"><i class="fas fa-play"></i> 재생</button>
+        <button class="btn btn-secondary"><i class="fas fa-info-circle"></i> 상세 정보</button>
       </div>
-    </section>
+    </div>
+  </header>
 
+  <!-- Content Sections -->
+  <div class="page-content" style="margin-top: -100px; position: relative; z-index: 10;">
+    
     <section class="section">
-      <div class="section-head">
-        <h2>계속 시청</h2>
-        <div class="section-actions">
-          <button id="watch-set-btn">지금 위치 저장</button>
-        </div>
-      </div>
+      <h2>시청 중인 콘텐츠</h2>
       <div class="carousel" id="continue-list"></div>
     </section>
 
     <section class="section">
-      <div class="section-head">
-        <h2>전체 영상</h2>
-      </div>
-      <div class="grid" id="video-list"></div>
+      <h2>지금 뜨는 콘텐츠</h2>
+      <div class="carousel" id="video-list"></div>
     </section>
 
-    <section class="section upload">
-      <div class="section-head">
-        <h2>업로드</h2>
-        <span class="hint">2GB 이하, 자동 세그먼트/썸네일 생성</span>
-      </div>
-      <div class="upload-form">
-        <input type="file" id="upload-file" accept="video/*">
-        <input type="text" id="upload-title" placeholder="제목">
-        <input type="text" id="upload-desc" placeholder="설명">
-        <button id="upload-btn">업로드</button>
-      </div>
-      <div class="upload-status">
-        <div class="progress"><div id="upload-progress"></div></div>
-        <div id="upload-msg"></div>
-      </div>
+    <section class="section">
+      <h2>새로 올라온 콘텐츠</h2>
+      <div class="carousel" id="new-list"></div>
     </section>
-
-    <div class="player-drawer hidden" id="player-drawer">
-      <div class="player-header">
-        <div>
-          <div class="eyebrow">현재 재생</div>
-          <div id="detail-title" class="title">-</div>
-          <div id="detail-desc" class="desc">-</div>
-          <div class="meta">
-            <span id="detail-duration">-</span>
-            <span id="detail-file">-</span>
-          </div>
-        </div>
-        <button id="drawer-close">닫기</button>
-      </div>
-      <div class="player-shell">
-        <video id="player" controls></video>
-        <div class="player-status">
-          <span>Conn <b id="meta-conn">-</b></span>
-          <span>Stream <b id="meta-stream">-</b></span>
-          <span>Bytes <b id="meta-bytes">-</b></span>
-          <span>Chunk <b id="meta-chunk">-</b></span>
-        </div>
-        <div class="player-controls">
-          <label>오프셋(ms) <input id="seek-offset" type="number" value="0"></label>
-          <button id="seek-btn">시크</button>
-          <button id="stop-btn">중단</button>
-        </div>
-      </div>
-      <div class="log">
-        <div class="log-head">
-          <h3>로그</h3>
-          <button id="watch-get-inline">이어보기 조회</button>
-        </div>
-        <pre id="log"></pre>
-      </div>
-    </div>
-    <div id="toast" class="toast hidden"></div>
   </div>
-  <script src="js/app.js"></script>
+
+  <script src="js/common.js"></script>
+  <script src="js/index.js"></script>
+  <script>
+    window.addEventListener('scroll', () => {
+      const nav = document.getElementById('navbar');
+      if (window.scrollY > 50) {
+        nav.classList.add('scrolled');
+      } else {
+        nav.classList.remove('scrolled');
+      }
+    });
+  </script>
 </body>
 </html>

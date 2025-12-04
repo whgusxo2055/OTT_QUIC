@@ -9,6 +9,18 @@
 #include <unistd.h>
 #include <time.h>
 
+static const unsigned char *find_bytes(const unsigned char *haystack, size_t hay_len, const char *needle, size_t needle_len) {
+    if (!haystack || !needle || hay_len == 0 || needle_len == 0 || needle_len > hay_len) {
+        return NULL;
+    }
+    for (size_t i = 0; i + needle_len <= hay_len; ++i) {
+        if (memcmp(haystack + i, needle, needle_len) == 0) {
+            return haystack + i;
+        }
+    }
+    return NULL;
+}
+
 static int ensure_dir(const char *path) {
     if (access(path, F_OK) == 0) {
         return 0;
@@ -26,9 +38,17 @@ static int write_file(const char *path, const char *data, size_t len) {
     return w == len ? 0 : -1;
 }
 
-static int parse_multipart(const char *body, size_t body_len, const char *boundary, char **out_file, size_t *out_file_len, char *title, size_t title_len, char *desc, size_t desc_len) {
-    const char *p = body;
-    const char *end = body + body_len;
+static int parse_multipart(const char *body,
+                           size_t body_len,
+                           const char *boundary,
+                           char **out_file,
+                           size_t *out_file_len,
+                           char *title,
+                           size_t title_len,
+                           char *desc,
+                           size_t desc_len) {
+    const unsigned char *p = (const unsigned char *)body;
+    const unsigned char *end = p + body_len;
     size_t b_len = strlen(boundary);
     *out_file = NULL;
     *out_file_len = 0;
@@ -36,16 +56,18 @@ static int parse_multipart(const char *body, size_t body_len, const char *bounda
     if (desc) desc[0] = '\0';
 
     while (p < end) {
-        const char *b = strstr(p, boundary);
+        const unsigned char *b = find_bytes(p, (size_t)(end - p), boundary, b_len);
         if (!b) break;
         p = b + b_len;
+        if ((size_t)(end - p) < 2) break;
         if (*p == '-' && *(p + 1) == '-') break;
-        const char *hdr_end = strstr(p, "\r\n\r\n");
+        const unsigned char *hdr_end = find_bytes(p, (size_t)(end - p), "\r\n\r\n", 4);
         if (!hdr_end) break;
         size_t hdr_len = (size_t)(hdr_end - p);
         char hdr[512] = {0};
         if (hdr_len >= sizeof(hdr)) hdr_len = sizeof(hdr) - 1;
         memcpy(hdr, p, hdr_len);
+
         const char *disp = strstr(hdr, "Content-Disposition:");
         const char *name = NULL;
         const char *filename = NULL;
@@ -55,10 +77,13 @@ static int parse_multipart(const char *body, size_t body_len, const char *bounda
             filename = strstr(disp, "filename=\"");
             if (filename) filename += 10;
         }
-        const char *data_start = hdr_end + 4;
-        const char *next = strstr(data_start, boundary);
+        const unsigned char *data_start = hdr_end + 4;
+        const unsigned char *next = find_bytes(data_start, (size_t)(end - data_start), boundary, b_len);
         if (!next) break;
-        size_t data_len = (size_t)(next - data_start - 2); /* trim \r\n */
+        size_t data_len = (size_t)(next - data_start);
+        if (data_len >= 2 && *(next - 2) == '\r' && *(next - 1) == '\n') {
+            data_len -= 2; /* trim \r\n before boundary */
+        }
 
         if (filename) {
             *out_file = malloc(data_len);
@@ -88,7 +113,9 @@ int handle_upload_request(int fd, const char *headers, const char *body, size_t 
 
     const size_t MAX_UPLOAD_BYTES = (size_t)2 * 1024 * 1024 * 1024ULL; /* 2GB 제한 */
     if (body_len > MAX_UPLOAD_BYTES) {
-        const char *resp = "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\n\r\n"
+        const char *resp = "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\n"
+                           "Access-Control-Allow-Origin: *\r\n"
+                           "Access-Control-Allow-Credentials: true\r\n\r\n"
                            "{\"status\":\"error\",\"message\":\"payload-too-large\"}";
         write(fd, resp, strlen(resp));
         return -1;
@@ -105,6 +132,9 @@ int handle_upload_request(int fd, const char *headers, const char *body, size_t 
     }
     ct = strchr(ct, '=');
     if (!ct) {
+        const char *resp = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\r\n"
+                           "{\"status\":\"error\",\"message\":\"missing-boundary\"}";
+        write(fd, resp, strlen(resp));
         return -1;
     }
     ct++;
@@ -127,7 +157,9 @@ int handle_upload_request(int fd, const char *headers, const char *body, size_t 
     char title[128];
     char desc[256];
     if (parse_multipart(body, body_len, boundary, &file_data, &file_len, title, sizeof(title), desc, sizeof(desc)) != 0 || file_len == 0) {
-        const char *resp = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\r\n"
+        const char *resp = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n"
+                           "Access-Control-Allow-Origin: *\r\n"
+                           "Access-Control-Allow-Credentials: true\r\n\r\n"
                            "{\"status\":\"error\",\"message\":\"invalid-multipart\"}";
         write(fd, resp, strlen(resp));
         return -1;
@@ -193,7 +225,10 @@ int handle_upload_request(int fd, const char *headers, const char *body, size_t 
     char resp[256];
     int len = snprintf(resp,
                        sizeof(resp),
-                       "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\",\"video_id\":%d}",
+                       "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                       "Access-Control-Allow-Origin: *\r\n"
+                       "Access-Control-Allow-Credentials: true\r\n\r\n"
+                       "{\"status\":\"ok\",\"video_id\":%d}",
                        video_id);
     write(fd, resp, (size_t)len);
     return 0;

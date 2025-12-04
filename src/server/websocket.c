@@ -45,7 +45,8 @@ typedef enum {
     WS_CMD_STREAM_SEEK,
     WS_CMD_STREAM_STOP,
     WS_CMD_WS_INIT,
-    WS_CMD_WS_SEGMENT
+    WS_CMD_WS_SEGMENT,
+    WS_CMD_LIST_CONTINUE
 } ws_command_type;
 
 typedef struct {
@@ -86,10 +87,11 @@ static int hex_to_bytes(const char *hex, uint8_t *out, size_t max_len, size_t *o
 static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t *frame, int user_id);
 static int send_json_response(int fd, const char *type, const char *status, const char *message);
 static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t *frame, int user_id);
-static int handle_http_login(int fd, const http_request_t *req, websocket_context_t *ctx);
+static int handle_http_login(int fd, const http_request_t *req, websocket_context_t *ctx, const char *pre_read_buf, size_t pre_read_len);
 static int handle_http_logout(int fd, const http_request_t *req, websocket_context_t *ctx);
 static int handle_http_upload(int fd, const http_request_t *req, const char *body, size_t body_len, websocket_context_t *ctx);
 static int send_http_response(int fd, const char *status_line, const char *headers, const char *body);
+static void build_cors_header(const http_request_t *req, char *out, size_t out_size);
 static int send_video_chunk(websocket_context_t *ctx,
                             uint64_t connection_id,
                             uint32_t stream_id,
@@ -249,7 +251,10 @@ int websocket_handle_client(int client_fd, websocket_context_t *ctx) {
 
     if (validate_websocket_request(&request) != 0) {
         if (ctx && ctx->db && strcmp(request.path, "/login") == 0) {
-            int rc = handle_http_login(client_fd, &request, ctx);
+            const char *sep = strstr(buffer, "\r\n\r\n");
+            size_t header_size = sep ? (size_t)(sep - buffer + 4) : received;
+            size_t already = received > header_size ? received - header_size : 0;
+            int rc = handle_http_login(client_fd, &request, ctx, buffer + header_size, already);
             close(client_fd);
             return rc;
         }
@@ -259,33 +264,48 @@ int websocket_handle_client(int client_fd, websocket_context_t *ctx) {
             return rc;
         }
         if (ctx && ctx->db && strcmp(request.path, "/upload") == 0) {
+            if (strcasecmp(request.method, "OPTIONS") == 0) {
+                char cors[256];
+                build_cors_header(&request, cors, sizeof(cors));
+                send_http_response(client_fd, "HTTP/1.1 204 No Content\r\n", cors, "");
+                close(client_fd);
+                return 0;
+            }
             const char *cl = http_get_header(&request, "content-length");
-            long content_len = cl ? strtol(cl, NULL, 10) : 0;
+            const size_t MAX_UPLOAD_BYTES = (size_t)2 * 1024 * 1024 * 1024ULL;
+            long content_len_long = cl ? strtol(cl, NULL, 10) : 0;
+            if (content_len_long <= 0 || (size_t)content_len_long > MAX_UPLOAD_BYTES) {
+                send_http_error(client_fd, "HTTP/1.1 413 Payload Too Large\r\n\r\n");
+                close(client_fd);
+                return -1;
+            }
+            size_t content_len = (size_t)content_len_long;
             const char *sep = strstr(buffer, "\r\n\r\n");
             size_t header_size = sep ? (size_t)(sep - buffer + 4) : received;
             size_t already = received > header_size ? received - header_size : 0;
             char *body_buf = NULL;
-            if (content_len > 0 && content_len < (20 * 1024 * 1024)) {
-                body_buf = malloc((size_t)content_len);
-            }
+            body_buf = malloc(content_len);
             if (!body_buf) {
-                send_http_error(client_fd, "HTTP/1.1 400 Bad Request\r\n\r\n");
+                send_http_error(client_fd, "HTTP/1.1 500 Internal Server Error\r\n\r\n");
                 close(client_fd);
                 return -1;
             }
-            if (already > 0 && already <= (size_t)content_len) {
+            if (already > 0 && already <= content_len) {
                 memcpy(body_buf, buffer + header_size, already);
             }
-            size_t remaining = (size_t)content_len - already;
+            size_t remaining = content_len - already;
             if (remaining > 0 && read_exact(client_fd, body_buf + already, remaining) != 0) {
                 free(body_buf);
                 send_http_error(client_fd, "HTTP/1.1 400 Bad Request\r\n\r\n");
                 close(client_fd);
                 return -1;
             }
-            int rc = handle_http_upload(client_fd, &request, body_buf, (size_t)content_len, ctx);
+            int rc = handle_http_upload(client_fd, &request, body_buf, content_len, ctx);
             free(body_buf);
             close(client_fd);
+            if (rc != 0) {
+                send_http_error(client_fd, "HTTP/1.1 400 Bad Request\r\n\r\n");
+            }
             return rc;
         }
         send_http_error(client_fd, "HTTP/1.1 400 Bad Request\r\n\r\n");
@@ -388,7 +408,14 @@ static int handle_http_upload(int fd, const http_request_t *req, const char *bod
     if (!body || body_len == 0) {
         return send_http_response(fd, "HTTP/1.1 400 Bad Request\r\n", "Content-Type: text/plain\r\n", "empty-body");
     }
-    if (handle_upload_request(fd, NULL, body, body_len, ctx->db) != 0) {
+    const char *ct = http_get_header(req, "content-type");
+    char headers[512];
+    if (ct) {
+        snprintf(headers, sizeof(headers), "Content-Type: %s\r\n", ct);
+    } else {
+        headers[0] = '\0';
+    }
+    if (handle_upload_request(fd, headers, body, body_len, ctx->db) != 0) {
         return send_http_response(fd, "HTTP/1.1 500 Internal Server Error\r\n", "Content-Type: text/plain\r\n", "upload-failed");
     }
     return 0;
@@ -415,6 +442,19 @@ static int send_http_response(int fd, const char *status_line, const char *heade
         return -1;
     }
     return write_all(fd, buffer, (size_t)len);
+}
+
+static void build_cors_header(const http_request_t *req, char *out, size_t out_size) {
+    if (!out || out_size == 0) return;
+    const char *origin = req ? http_get_header(req, "origin") : NULL;
+    const char *use_origin = origin && strlen(origin) < 200 ? origin : "*";
+    snprintf(out,
+             out_size,
+             "Access-Control-Allow-Origin: %s\r\n"
+             "Access-Control-Allow-Credentials: true\r\n"
+             "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+             "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n",
+             use_origin);
 }
 
 static int header_contains_token(const char *value, const char *token) {
@@ -468,9 +508,14 @@ static int validate_websocket_request(const http_request_t *req) {
     return 0;
 }
 
-static int handle_http_login(int fd, const http_request_t *req, websocket_context_t *ctx) {
+static int handle_http_login(int fd, const http_request_t *req, websocket_context_t *ctx, const char *pre_read_buf, size_t pre_read_len) {
     if (!ctx || !ctx->db) {
         return send_http_response(fd, "HTTP/1.1 503 Service Unavailable\r\n", "Content-Type: text/plain\r\n", "service-unavailable");
+    }
+    if (strcasecmp(req->method, "OPTIONS") == 0) {
+        char cors[256];
+        build_cors_header(req, cors, sizeof(cors));
+        return send_http_response(fd, "HTTP/1.1 204 No Content\r\n", cors, "");
     }
     if (strcasecmp(req->method, "POST") != 0) {
         return send_http_response(fd, "HTTP/1.1 405 Method Not Allowed\r\n", "Content-Type: text/plain\r\n", "method-not-allowed");
@@ -486,8 +531,16 @@ static int handle_http_login(int fd, const http_request_t *req, websocket_contex
     }
 
     char body[1025];
-    if (read_exact(fd, body, (size_t)body_len) != 0) {
-        return send_http_response(fd, "HTTP/1.1 400 Bad Request\r\n", "Content-Type: text/plain\r\n", "body-read-failed");
+    size_t to_copy = pre_read_len > (size_t)body_len ? (size_t)body_len : pre_read_len;
+    if (to_copy > 0) {
+        memcpy(body, pre_read_buf, to_copy);
+    }
+    
+    size_t remaining = (size_t)body_len - to_copy;
+    if (remaining > 0) {
+        if (read_exact(fd, body + to_copy, remaining) != 0) {
+            return send_http_response(fd, "HTTP/1.1 400 Bad Request\r\n", "Content-Type: text/plain\r\n", "body-read-failed");
+        }
     }
     body[body_len] = '\0';
 
@@ -503,14 +556,28 @@ static int handle_http_login(int fd, const http_request_t *req, websocket_contex
         return send_http_response(fd, "HTTP/1.1 401 Unauthorized\r\n", "Content-Type: text/plain\r\n", "login-failed");
     }
 
-    char headers[256];
-    snprintf(headers,
-             sizeof(headers),
-             "Content-Type: application/json\r\n"
-             "Set-Cookie: SID=%s; HttpOnly; Secure\r\n",
-             sid);
-    char resp_body[256];
-    snprintf(resp_body, sizeof(resp_body), "{\"session_id\":\"%s\"}", sid);
+    char headers[512];
+    char cors[256];
+    build_cors_header(req, cors, sizeof(cors));
+    int hlen = snprintf(headers,
+                        sizeof(headers),
+                        "Content-Type: application/json\r\n"
+                        "Set-Cookie: SID=%s; HttpOnly; Path=/; SameSite=Lax\r\n"
+                        "%s",
+                        sid,
+                        cors);
+    if (hlen < 0 || (size_t)hlen >= sizeof(headers)) {
+        return send_http_response(fd, "HTTP/1.1 500 Internal Server Error\r\n", "Content-Type: text/plain\r\n", "header-too-long");
+    }
+    
+    int is_admin = 0;
+    if (strncmp(user, "admin", 5) == 0) {
+        is_admin = 1;
+    }
+
+    char resp_body[512];
+    snprintf(resp_body, sizeof(resp_body), "{\"session_id\":\"%s\",\"username\":\"%s\",\"is_admin\":%s}", 
+             sid, user, is_admin ? "true" : "false");
     return send_http_response(fd, "HTTP/1.1 200 OK\r\n", headers, resp_body);
 }
 
@@ -518,12 +585,29 @@ static int handle_http_logout(int fd, const http_request_t *req, websocket_conte
     if (!ctx || !ctx->db) {
         return send_http_response(fd, "HTTP/1.1 503 Service Unavailable\r\n", "Content-Type: text/plain\r\n", "service-unavailable");
     }
+    if (strcasecmp(req->method, "OPTIONS") == 0) {
+        char cors[256];
+        build_cors_header(req, cors, sizeof(cors));
+        return send_http_response(fd, "HTTP/1.1 204 No Content\r\n", cors, "");
+    }
     char sid[SESSION_ID_LEN + 1];
     if (session_extract_from_headers(req, sid, sizeof(sid)) != 0) {
         return send_http_response(fd, "HTTP/1.1 400 Bad Request\r\n", "Content-Type: text/plain\r\n", "session-missing");
     }
     session_logout(ctx->db, sid);
-    return send_http_response(fd, "HTTP/1.1 200 OK\r\n", "Content-Type: text/plain\r\nSet-Cookie: SID=; Max-Age=0; HttpOnly; Secure\r\n", "logged-out");
+    char cors[256];
+    build_cors_header(req, cors, sizeof(cors));
+    char headers[512];
+    int hlen = snprintf(headers,
+                        sizeof(headers),
+                        "Content-Type: text/plain\r\n"
+                        "Set-Cookie: SID=; Max-Age=0; HttpOnly; Path=/; SameSite=Lax\r\n"
+                        "%s",
+                        cors);
+    if (hlen < 0 || (size_t)hlen >= sizeof(headers)) {
+        return send_http_response(fd, "HTTP/1.1 500 Internal Server Error\r\n", "Content-Type: text/plain\r\n", "header-too-long");
+    }
+    return send_http_response(fd, "HTTP/1.1 200 OK\r\n", headers, "logged-out");
 }
 
 static int perform_handshake(int fd, http_request_t *request) {
@@ -892,9 +976,80 @@ static int parse_command(const char *text, ws_command_t *cmd) {
         return 0;
     }
 
+    if (strcmp(type, "list_continue") == 0) {
+        cmd->type = WS_CMD_LIST_CONTINUE;
+        return 0;
+    }
+
     if (strcmp(type, "video_detail") == 0) {
         cmd->type = WS_CMD_VIDEO_DETAIL;
         if (json_extract_int_field(text, "video_id", &cmd->video_id) != 0) {
+            return -1;
+        }
+        return 0;
+    }
+
+    if (strcmp(type, "watch_get") == 0) {
+        cmd->type = WS_CMD_WATCH_GET;
+        if (json_extract_int_field(text, "video_id", &cmd->video_id) != 0) {
+            return -1;
+        }
+        return 0;
+    }
+
+    if (strcmp(type, "watch_update") == 0) {
+        cmd->type = WS_CMD_WATCH_UPDATE;
+        if (json_extract_int_field(text, "video_id", &cmd->video_id) != 0) {
+            return -1;
+        }
+        if (json_extract_int_field(text, "position", &cmd->position) != 0) {
+            return -1;
+        }
+        return 0;
+    }
+
+    if (strcmp(type, "stream_start") == 0) {
+        cmd->type = WS_CMD_STREAM_START;
+        if (json_extract_int_field(text, "video_id", &cmd->video_id) != 0) {
+            return -1;
+        }
+        return 0;
+    }
+
+    if (strcmp(type, "stream_chunk") == 0) {
+        cmd->type = WS_CMD_STREAM_CHUNK;
+        if (json_extract_int_field(text, "video_id", &cmd->video_id) != 0) {
+            return -1;
+        }
+        if (json_extract_uint32_field(text, "offset", &cmd->offset) != 0) {
+            return -1;
+        }
+        if (json_extract_uint32_field(text, "length", &cmd->length) != 0) {
+            return -1;
+        }
+        if (json_extract_uint64_field(text, "connection_id", &cmd->connection_id) != 0) {
+            return -1;
+        }
+        if (json_extract_uint32_field(text, "stream_id", &cmd->stream_id) != 0) {
+            cmd->stream_id = 1;
+        }
+        return 0;
+    }
+
+    if (strcmp(type, "ws_init") == 0) {
+        cmd->type = WS_CMD_WS_INIT;
+        if (json_extract_int_field(text, "video_id", &cmd->video_id) != 0) {
+            return -1;
+        }
+        return 0;
+    }
+
+    if (strcmp(type, "ws_segment") == 0) {
+        cmd->type = WS_CMD_WS_SEGMENT;
+        if (json_extract_int_field(text, "video_id", &cmd->video_id) != 0) {
+            return -1;
+        }
+        if (json_extract_int_field(text, "segment", &cmd->segment_index) != 0) {
             return -1;
         }
         return 0;
@@ -986,6 +1141,54 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
         char buf[4096];
         size_t pos = 0;
         pos += (size_t)snprintf(buf + pos, sizeof(buf) - pos, "{\"type\":\"videos\",\"items\":[");
+        int first = 1;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            if (!first) {
+                buf[pos++] = ',';
+            }
+            first = 0;
+            int id = sqlite3_column_int(stmt, 0);
+            const unsigned char *title = sqlite3_column_text(stmt, 1);
+            const unsigned char *thumb = sqlite3_column_text(stmt, 2);
+            int duration = sqlite3_column_int(stmt, 3);
+            pos += (size_t)snprintf(buf + pos,
+                                    sizeof(buf) - pos,
+                                    "{\"id\":%d,\"title\":\"%s\",\"thumbnail_path\":\"%s\",\"duration\":%d}",
+                                    id,
+                                    title ? (const char *)title : "",
+                                    thumb ? (const char *)thumb : "",
+                                    duration);
+            if (pos >= sizeof(buf) - 1) {
+                break;
+            }
+        }
+        sqlite3_finalize(stmt);
+        if (pos >= sizeof(buf) - 2) {
+            return send_json_response(fd, "error", "internal_error", "response-too-large");
+        }
+        pos += (size_t)snprintf(buf + pos, sizeof(buf) - pos, "]}");
+        return ws_send_frame(fd, 0x1, (const uint8_t *)buf, pos);
+    }
+
+    if (cmd.type == WS_CMD_LIST_CONTINUE) {
+        if (!ctx || !ctx->db) {
+            return send_json_response(fd, "error", "unavailable", "db-missing");
+        }
+        if (user_id <= 0) {
+            return send_json_response(fd, "error", "unauthorized", "login-required");
+        }
+        sqlite3_stmt *stmt = NULL;
+        const char *sql = "SELECT v.id, v.title, IFNULL(v.thumbnail_path,''), IFNULL(v.duration,0) "
+                          "FROM watch_history w JOIN videos v ON w.video_id = v.id "
+                          "WHERE w.user_id = ? ORDER BY w.updated_at DESC LIMIT 10;";
+        if (sqlite3_prepare_v2(ctx->db->conn, sql, -1, &stmt, NULL) != SQLITE_OK) {
+            return send_json_response(fd, "error", "db_error", "list-continue-failed");
+        }
+        sqlite3_bind_int(stmt, 1, user_id);
+        
+        char buf[4096];
+        size_t pos = 0;
+        pos += (size_t)snprintf(buf + pos, sizeof(buf) - pos, "{\"type\":\"continue_videos\",\"items\":[");
         int first = 1;
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             if (!first) {
@@ -1139,22 +1342,105 @@ static int handle_text_frame(int fd, websocket_context_t *ctx, const ws_frame_t 
     }
 
     if (cmd.type == WS_CMD_WS_INIT) {
-        if (user_id <= 0) {
-            return send_json_response(fd, "ws_init", "unauthorized", "login-required");
-        }
         char path[512];
         snprintf(path, sizeof(path), "data/segments/%d/init-stream0.m4s", cmd.video_id);
         if (send_ws_file(fd, path, "INIT", 0) != 0) {
             fprintf(stderr, "[ws] init segment missing video=%d path=%s\n", cmd.video_id, path);
             return send_json_response(fd, "ws_segment", "error", "init-missing");
         }
+        
+        // Try to read segment_info.json first
+        char info_path[512];
+        snprintf(info_path, sizeof(info_path), "data/segments/%d/segment_info.json", cmd.video_id);
+        FILE *fp = fopen(info_path, "r");
+        if (fp) {
+            // Read the entire segment_info.json
+            fseek(fp, 0, SEEK_END);
+            long file_size = ftell(fp);
+            fseek(fp, 0, SEEK_SET);
+            
+            if (file_size > 0 && file_size < 1024 * 1024) { // Max 1MB
+                // Allocate buffer for: header + file content
+                size_t header_max = 64;
+                char *buffer = malloc(header_max + file_size + 1);
+                if (buffer) {
+                    // Read file content after header space
+                    size_t read_len = fread(buffer + header_max, 1, file_size, fp);
+                    fclose(fp);
+                    buffer[header_max + read_len] = '\0';
+                    
+                    if (read_len == (size_t)file_size) {
+                        // Original JSON: {"total_duration":..., "total_segments":..., "segments":[...]}
+                        // Target JSON: {"type":"ws_init","status":"ok","total_duration":..., ...}
+                        
+                        // Find first '{' and skip it, then prepend our header
+                        char *json_start = buffer + header_max;
+                        while (*json_start && (*json_start == ' ' || *json_start == '\n' || *json_start == '\r' || *json_start == '\t')) {
+                            json_start++;
+                        }
+                        
+                        if (*json_start == '{') {
+                            json_start++; // Skip the opening brace
+                            // Skip any whitespace after {
+                            while (*json_start && (*json_start == ' ' || *json_start == '\n' || *json_start == '\r' || *json_start == '\t')) {
+                                json_start++;
+                            }
+                            
+                            // Calculate where to put our header
+                            const char *header = "{\"type\":\"ws_init\",\"status\":\"ok\",";
+                            size_t header_len = strlen(header);
+                            size_t content_len = strlen(json_start);
+                            
+                            // Create response in place
+                            char *resp_start = json_start - header_len;
+                            if (resp_start >= buffer) {
+                                memcpy(resp_start, header, header_len);
+                                size_t resp_len = header_len + content_len;
+                                int rc = ws_send_frame(fd, 0x1, (const uint8_t *)resp_start, resp_len);
+                                free(buffer);
+                                return rc;
+                            }
+                        }
+                    }
+                    free(buffer);
+                }
+            } else {
+                fclose(fp);
+            }
+        }
+        
+        // Fallback: count segments manually if segment_info.json doesn't exist
+        int duration = 0;
+        int total_segments = 0;
+        if (ctx && ctx->db) {
+            db_video_t video;
+            if (db_get_video_by_id(ctx->db, cmd.video_id, &video) == SQLITE_OK) {
+                duration = video.duration;
+            }
+        }
+        
+        // Count segment files
+        for (int i = 0; i < 1000; i++) {
+            char seg_path[256];
+            snprintf(seg_path, sizeof(seg_path), "data/segments/%d/chunk-stream0-%05d.m4s", cmd.video_id, i);
+            struct stat st;
+            if (stat(seg_path, &st) != 0) {
+                total_segments = i;
+                break;
+            }
+        }
+        
+        char resp[256];
+        int len = snprintf(resp, sizeof(resp),
+            "{\"type\":\"ws_init\",\"status\":\"ok\",\"duration\":%d,\"total_segments\":%d}",
+            duration, total_segments);
+        if (len > 0 && len < (int)sizeof(resp)) {
+            return ws_send_frame(fd, 0x1, (const uint8_t *)resp, (size_t)len);
+        }
         return send_json_response(fd, "ws_init", "ok", "init-sent");
     }
 
     if (cmd.type == WS_CMD_WS_SEGMENT) {
-        if (user_id <= 0) {
-            return send_json_response(fd, "ws_segment", "unauthorized", "login-required");
-        }
         char path[512];
         snprintf(path, sizeof(path), "data/segments/%d/chunk-stream0-%05d.m4s", cmd.video_id, cmd.segment_index);
         int retries = 0;
