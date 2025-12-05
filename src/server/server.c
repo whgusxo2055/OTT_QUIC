@@ -275,14 +275,22 @@ static void *client_worker(void *arg) {
         ssl = SSL_new(ctx->ssl_ctx);
         if (!ssl) {
             close(client_fd);
+            free(task);
             goto done;
         }
         SSL_set_fd(ssl, client_fd);
         if (SSL_accept(ssl) != 1) {
-            ERR_print_errors_fp(stderr);
+            // SSL 핸드셰이크 실패 (평문 HTTP 요청이 HTTPS 포트로 온 경우 등)
+            // 에러를 stderr에 출력하지 않고 조용히 처리 (정상적인 거부 케이스)
+            int ssl_err = SSL_get_error(ssl, -1);
+            if (ssl_err != SSL_ERROR_WANT_READ && ssl_err != SSL_ERROR_WANT_WRITE) {
+                // 실제 에러인 경우에만 로그 출력
+                fprintf(stderr, "[TLS] SSL_accept failed for client (possibly plain HTTP on HTTPS port)\n");
+            }
             SSL_free(ssl);
             ssl = NULL;
             close(client_fd);
+            free(task);
             goto done;
         }
     }
