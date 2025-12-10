@@ -40,23 +40,22 @@ docker-compose up --build
 # 종료
 docker-compose down
 
-# 정적 썸네일/nginx만 확인할 때
-# http://localhost:8080/data/thumbs/...
+# 정적 자원 확인은 https://localhost:8443/data/... (80/8080은 8443으로 리다이렉트)
 ```
 
 **중요:** Docker 환경에서는 반드시 **HTTPS(8443)**와 **WSS(WebSocket Secure)**를 사용해야 합니다.
-- ✅ 웹 접속: http://localhost:8080 (nginx가 정적 파일 제공)
-- ✅ API/WebSocket: wss://localhost:8443 (TLS 활성화된 서버)
+- ✅ 웹 접속: https://localhost:8443 (nginx TLS 종료)
+- ✅ API/WebSocket: wss://localhost:8443 (nginx → 내부 8080 백엔드 프록시)
 - ❌ http://localhost:8443 (평문 HTTP → SSL 에러 발생)
 
 ## 웹/관리자 사용
 - 로그인: `/web/login.html` → 세션/닉네임 저장 후 홈 이동
 - 회원가입: `/web/signup.html` (닉네임/아이디/비밀번호)
 - 관리자: `admin.html`(업로드/영상 메타 수정·삭제), 홈 우측 관리자 버튼은 `ott_is_admin` 로컬스토리지에 따라 표시
-- 홈 썸네일은 nginx(8080) 우선, 실패 시 8443 서버로 폴백
+- 썸네일/정적 자원도 동일 오리진(https://localhost:8443)에서 서빙
 
 ## 개발 메모
-- C 표준: C11, 기본 포트: TCP 8443(HTTPS/WSS), UDP 9443(QUIC)
+- C 표준: C11, 기본 포트: 외부 TLS 8443(nginx), 내부 HTTP 백엔드 8080, UDP 9443(QUIC)
 - 데이터 파일은 `data/` 디렉터리에 저장되며 Git에서 제외됩니다. 인증서 `certs/`도 Git 무시 대상입니다.
 - 일부 테스트(`server_test`, `quic_engine_test`)는 포트 바인딩이 불가한 환경에서 skip될 수 있습니다.
 - **SSL 에러 방지:** HTTPS 포트(8443)에는 반드시 HTTPS/WSS 요청만 보내야 합니다. 평문 HTTP 요청 시 SSL 핸드셰이크 실패 에러가 발생하지만 서버는 정상 동작합니다.

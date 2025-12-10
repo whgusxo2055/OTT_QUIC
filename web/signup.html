@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <title>OTT_QUIC - 회원가입</title>
+  <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
   <link rel="stylesheet" href="css/style.css">
   <style>
     body {
@@ -95,8 +96,7 @@
   <script>
     const apiHost = location.hostname || 'localhost';
     const apiPort = '8443';
-    const useHttps = location.protocol === 'https:';
-    const apiBase = `${useHttps ? 'https' : 'http'}://${apiHost}:${apiPort}`;
+    const apiBase = `https://${apiHost}:${apiPort}`;
 
     async function handleSignup() {
       const nickname = document.getElementById('nickname').value.trim();

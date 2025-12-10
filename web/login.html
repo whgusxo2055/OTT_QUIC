@@ -3,9 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <title>OTT_QUIC - 로그인</title>
+  <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
   <link rel="stylesheet" href="css/style.css">
   <style>
     body {
+      /* 외부 이미지 404 방지: 로컬 그라디언트만 사용 */
       background: radial-gradient(110% 60% at 20% 20%, rgba(229, 9, 20, 0.25), rgba(20, 20, 20, 0.9)),
                   radial-gradient(80% 50% at 80% 10%, rgba(255, 255, 255, 0.08), rgba(20, 20, 20, 0.95)),
                   #0f0f0f;
@@ -80,15 +82,15 @@
       <button id="login-btn" onclick="handleLogin()">로그인</button>
     </div>
     <div class="login-signup">
-      회원이 아니신가요?  <a href="signup.html">지금 가입하세요.</a>
+      회원이 아니신가요? <a href="signup.html">지금 가입하세요.</a>
     </div>
   </div>
 
   <script>
     const apiHost = location.hostname || 'localhost';
     const apiPort = '8443';
-    const useHttps = location.protocol === 'https:';
-    const apiBase = `${useHttps ? 'https' : 'http'}://${apiHost}:${apiPort}`;
+    // API는 항상 TLS(https)로 호출
+    const apiBase = `https://${apiHost}:${apiPort}`;
 
     async function handleLogin() {
       const user = document.getElementById('username').value;
@@ -104,10 +106,14 @@
         
         if (res.ok) {
           const data = await res.json();
-          // 세션 ID 저장 (localStorage 사용)
+          // 세션 정보 저장
           localStorage.setItem('ott_session_id', data.session_id);
           localStorage.setItem('ott_username', user);
-          localStorage.setItem('ott_nickname', data.nickname || user);
+          if (data.nickname) {
+            localStorage.setItem('ott_nickname', data.nickname);
+          } else {
+            localStorage.removeItem('ott_nickname');
+          }
           if (data.is_admin) {
             localStorage.setItem('ott_is_admin', 'true');
           } else {

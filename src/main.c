@@ -3,6 +3,7 @@
 #include "server/quic.h"
 #include "db/database.h"
 
+#include <stdint.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +22,18 @@ static void quic_default_handler(const quic_packet_t *packet, const struct socka
     (void)addr;
     (void)user_data;
     /* Placeholder: QUIC packets can be routed to WebSocket clients in later sprints. */
+}
+
+static uint16_t get_port_from_env(const char *env_value, uint16_t default_port) {
+    if (!env_value) {
+        return default_port;
+    }
+    char *endptr = NULL;
+    long port_val = strtol(env_value, &endptr, 10);
+    if (endptr == env_value || port_val <= 0 || port_val > 65535) {
+        return default_port;
+    }
+    return (uint16_t)port_val;
 }
 
 int main(void) {
@@ -71,7 +84,12 @@ int main(void) {
     websocket_context_init(&ws_context, &quic_engine, &db);
     ws_initialized = 1;
 
-    if (server_init(&server, "0.0.0.0", 8443, 5) != 0) {
+    const char *bind_ip = getenv("HOST");
+    if (!bind_ip || bind_ip[0] == '\0') {
+        bind_ip = "0.0.0.0";
+    }
+    uint16_t server_port = get_port_from_env(getenv("PORT"), 8080);
+    if (server_init(&server, bind_ip, server_port, 5) != 0) {
         fputs("Failed to initialize server context.\n", stderr);
         exit_code = 1;
         goto cleanup;
@@ -100,7 +118,8 @@ int main(void) {
     }
     server_started = 1;
 
-    puts("Server is running on TCP:0.0.0.0:8443 (HTTPS/WSS) and UDP:0.0.0.0:9443 (QUIC).");
+    printf("Server is running on TCP:%s:%u (HTTP backend behind Nginx TLS) and UDP:0.0.0.0:9443 (QUIC).\n",
+           bind_ip, (unsigned int)server_port);
 
     while (keep_running) {
         sleep(1);

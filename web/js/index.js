@@ -6,7 +6,7 @@ let currentSortOrder = 'latest';
 let pendingVideo = null;  // 이어보기 모달에서 선택된 비디오
 
 // 썸네일은 nginx(8080)에서 우선 제공, 실패 시 동일 호스트(8443)로 폴백
-const thumbBase = `http://${window.location.hostname}:8080/`;
+const thumbBase = `${window.location.origin}/`;
 const fallbackThumbBase = `${window.location.origin}/`;
 const THUMB_PLACEHOLDER = 'https://via.placeholder.com/320x180?text=No+Image';
 
@@ -71,7 +71,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function updateUserDisplay() {
-  const name = localStorage.getItem('ott_nickname') || '';
+  const name = localStorage.getItem('ott_nickname') || localStorage.getItem('ott_username') || '';
   const el = document.getElementById('user-display');
   if (el) {
     el.textContent = name ? `${name} 님` : '';
@@ -348,7 +348,10 @@ function showDetailModal(video) {
 }
 
 function connectWebSocket() {
-  socket = new WebSocket(wsUrl);
+  const wsEndpoint = (typeof wsUrl !== 'undefined' && wsUrl.startsWith('ws://'))
+    ? `wss://${wsUrl.slice('ws://'.length)}`
+    : (typeof wsUrl !== 'undefined' ? wsUrl : `wss://${window.location.hostname}:8443/ws`);
+  socket = new WebSocket(wsEndpoint);
   
   socket.onopen = () => {
     console.log('WebSocket connected');

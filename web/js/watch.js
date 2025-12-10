@@ -8,6 +8,9 @@ if (!videoId) {
   window.location.href = 'index.html';
 }
 
+const thumbBase = `${window.location.origin}/`;
+const fallbackThumbBase = `${window.location.origin}/`;
+
 // ===== 설정 =====
 const CONFIG = {
   BUFFER_AHEAD_MAX: 15,      // 최대 버퍼 길이 (초)
@@ -237,8 +240,11 @@ window.addEventListener('beforeunload', () => {
 });
 
 function connectWebSocket() {
-  console.log('[WS] Connecting to:', wsUrl);
-  socket = new WebSocket(wsUrl);
+  const wsEndpoint = (typeof wsUrl !== 'undefined' && wsUrl.startsWith('ws://'))
+    ? `wss://${wsUrl.slice('ws://'.length)}`
+    : (typeof wsUrl !== 'undefined' ? wsUrl : `wss://${window.location.hostname}:8443/ws`);
+  console.log('[WS] Connecting to:', wsEndpoint);
+  socket = new WebSocket(wsEndpoint);
   socket.binaryType = 'arraybuffer';
   
   socket.onopen = () => {
